@@ -12,12 +12,14 @@ import {
     Stethoscope,
     LogIn,
     BookOpen,
+    Bot,
 } from "lucide-react";
 
 export function Sidebar() {
     const pathname = usePathname();
     const menuItems = [
         { name: "Dashboard", icon: LayoutDashboard, href: "/" },
+        { name: "AI Receptionist", icon: Bot, href: "/receptionist" },
         { name: "Recent Appointments", icon: CalendarClock, href: "/appointments" },
         { name: "Account", icon: Users, href: "/account" },
         { name: "Time Scheduling", icon: Clock, href: "/settings" },

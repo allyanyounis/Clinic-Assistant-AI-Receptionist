@@ -4,30 +4,8 @@ import { useEffect, useState } from "react";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from "recharts";
 import { Calendar as CalendarIcon } from "lucide-react";
 
-const monthlyData = [
-    { name: '1', uv: 45 },
-    { name: '2', uv: 32 },
-    { name: '3', uv: 35 },
-    { name: '4', uv: 48 },
-    { name: '5', uv: 60 },
-    { name: '6', uv: 75 },
-    { name: '7', uv: 88 },
-    { name: '8', uv: 92 },
-    { name: '9', uv: 85 },
-    { name: '10', uv: 68 },
-    { name: '11', uv: 55 },
-    { name: '12', uv: 40 },
-];
-
-const rankingData = [
-    { rank: 3, title: "Vaccination", count: "21,128" },
-    { rank: 4, title: "Consultation", count: "18,943" },
-    { rank: 5, title: "Follow-up", count: "14,321" },
-    { rank: 6, title: "Pediatric Care", count: "9,845" },
-    { rank: 7, title: "Emergency", count: "5,432" },
-];
-
 import { Appointment } from "@/types";
+import { topReasons } from "@/lib/appointmentStats";
 
 
 export function MainChartArea({
@@ -92,6 +70,7 @@ export function MainChartArea({
     };
 
     const chartData = generateChartData();
+    const rankingData = topReasons(appointments);
     
     // Calculate the overall dates for the display
     const startDate = new Date();
@@ -189,20 +168,24 @@ export function MainChartArea({
 
                 {/* Right Side: Ranking List */}
                 <div>
-                    <h4 className="text-base font-medium text-gray-800 mb-6">Appointment Ranking</h4>
-                    <ul className="space-y-4">
-                        {rankingData.map((item) => (
-                            <li key={item.rank} className="flex items-center justify-between">
-                                <div className="flex items-center">
-                                    <span className={`w-5 h-5 flex items-center justify-center rounded-full text-xs mr-4 ${item.rank <= 3 ? "bg-[#6B1925] text-white" : "bg-[#f5f5f5] text-[#6B1925]"}`}>
-                                        {item.rank}
-                                    </span>
-                                    <span className="text-sm text-gray-600">{item.title}</span>
-                                </div>
-                                <span className="text-sm font-medium text-gray-800">{item.count}</span>
-                            </li>
-                        ))}
-                    </ul>
+                    <h4 className="text-base font-medium text-gray-800 mb-6">Top Visit Reasons</h4>
+                    {rankingData.length === 0 ? (
+                        <p className="text-sm text-gray-400 italic">No active appointments yet.</p>
+                    ) : (
+                        <ul className="space-y-4">
+                            {rankingData.map((item) => (
+                                <li key={item.rank} className="flex items-center justify-between">
+                                    <div className="flex items-center min-w-0">
+                                        <span className={`w-5 h-5 shrink-0 flex items-center justify-center rounded-full text-xs mr-4 ${item.rank <= 3 ? "bg-[#6B1925] text-white" : "bg-[#f5f5f5] text-[#6B1925]"}`}>
+                                            {item.rank}
+                                        </span>
+                                        <span className="text-sm text-gray-600 truncate">{item.title}</span>
+                                    </div>
+                                    <span className="text-sm font-medium text-gray-800 ml-3">{item.count}</span>
+                                </li>
+                            ))}
+                        </ul>
+                    )}
                 </div>
 
             </div>

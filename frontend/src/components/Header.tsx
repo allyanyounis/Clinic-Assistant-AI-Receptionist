@@ -7,9 +7,12 @@ import { useEffect, useState } from "react";
 
 interface HeaderProps {
     title?: string;
+    /** New bookings to show on the bell; badge is hidden when 0 or omitted. */
+    notificationCount?: number;
+    onNotificationsClick?: () => void;
 }
 
-export function Header({ title = "Dashboard of Doctor" }: HeaderProps) {
+export function Header({ title = "Dashboard of Doctor", notificationCount = 0, onNotificationsClick }: HeaderProps) {
     const router = useRouter();
     const [isLoggedIn, setIsLoggedIn] = useState(false);
 
@@ -47,11 +50,17 @@ export function Header({ title = "Dashboard of Doctor" }: HeaderProps) {
                 <button className="hover:text-gray-900 transition-colors">
                     <HelpCircle className="w-5 h-5" />
                 </button>
-                <button className="relative hover:text-gray-900 transition-colors">
+                <button
+                    onClick={onNotificationsClick}
+                    title={notificationCount > 0 ? `${notificationCount} new booking${notificationCount === 1 ? "" : "s"}` : "No new bookings"}
+                    className="relative hover:text-gray-900 transition-colors"
+                >
                     <Bell className="w-5 h-5" />
-                    <span className="absolute -top-1.5 -right-1.5 bg-[#f5222d] text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full">
-                        8
-                    </span>
+                    {notificationCount > 0 && (
+                        <span className="absolute -top-1.5 -right-1.5 bg-[#f5222d] text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full">
+                            {notificationCount > 99 ? "99+" : notificationCount}
+                        </span>
+                    )}
                 </button>
                 <div className="h-8 w-[1px] bg-gray-200 hidden sm:block mx-1"></div>
                 

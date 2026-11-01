@@ -9,6 +9,8 @@ export interface Appointment {
     start_time: string;
     canceled: boolean;
     created_at: string;
+    /** Call conversation as "AI: ..." / "User: ..." lines; null if not booked by a voice call. */
+    transcript?: string | null;
 }
 
 export interface ClinicSettings {

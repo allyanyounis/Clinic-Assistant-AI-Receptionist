@@ -5,9 +5,11 @@ import { Sidebar } from "@/components/Sidebar";
 import { Header } from "@/components/Header";
 import { TopSummaryCards } from "@/components/TopSummaryCards";
 import { MainChartArea } from "@/components/MainChartArea";
-import { VoiceDialer } from "@/components/VoiceDialer";
 import { API_BASE_URL } from "@/config";
 import { Appointment } from "@/types";
+import { bookedSince } from "@/lib/appointmentStats";
+
+const NOTIFICATIONS_SEEN_KEY = "notifications_last_seen";
 
 export default function Dashboard() {
     const [appointments, setAppointments] = useState<Appointment[]>([]);
@@ -15,6 +17,23 @@ export default function Dashboard() {
     const [workingDays, setWorkingDays] = useState<number[]>([]);
     const [loading, setLoading] = useState(false);
     const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+    // Bookings made after this moment count as new notifications (defaults to the last 24 hours)
+    const [notificationsSeenAt, setNotificationsSeenAt] = useState<Date>(() => new Date(Date.now() - 24 * 60 * 60 * 1000));
+
+    useEffect(() => {
+        try {
+            const saved = localStorage.getItem(NOTIFICATIONS_SEEN_KEY);
+            if (saved) setNotificationsSeenAt(new Date(saved));
+        } catch {}
+    }, []);
+
+    const markNotificationsSeen = () => {
+        const now = new Date();
+        setNotificationsSeenAt(now);
+        try {
+            localStorage.setItem(NOTIFICATIONS_SEEN_KEY, now.toISOString());
+        } catch {}
+    };
 
     const fetchAppointments = useCallback(async () => {
         console.log('Dashboard: Fetching appointments for today');
@@ -58,7 +77,7 @@ export default function Dashboard() {
         fetchAppointments();
     }, [fetchAppointments]);
 
-    const totalCanceled = appointments.filter(a => a.canceled).length;
+    const newBookings = bookedSince(appointments, notificationsSeenAt);
 
     return (
         <div className="flex min-h-screen bg-[#f0f2f5] font-sans">
@@ -69,22 +88,14 @@ export default function Dashboard() {
             {/* Main Content */}
             <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
 
-                <Header />
+                <Header notificationCount={newBookings} onNotificationsClick={markNotificationsSeen} />
 
                 <main className="flex-1 overflow-auto p-6">
 
-                    <TopSummaryCards
-                        totalAppointments={appointments.length}
-                        totalCanceled={totalCanceled}
-                    />
+                    <TopSummaryCards appointments={appointments} />
 
-                    <div className="flex gap-6 mt-6 items-start flex-wrap">
-                        <div className="flex-1 min-w-0">
-                            <MainChartArea appointments={appointments} holidays={holidays} workingDays={workingDays} />
-                        </div>
-                        <div className="shrink-0 w-full max-w-sm">
-                            <VoiceDialer />
-                        </div>
+                    <div className="mt-6">
+                        <MainChartArea appointments={appointments} holidays={holidays} workingDays={workingDays} />
                     </div>
 
                 </main>

@@ -92,6 +92,7 @@ class Appointment(Base):
     start_time = Column(DateTime, index=True)
     canceled = Column(Boolean, default=False)
     transcript = Column(Text, nullable=True)
+    call_id = Column(String, nullable=True, index=True)  # VAPI call that booked it; links the end-of-call transcript
     created_at = Column(DateTime, default=get_pakistan_now)
 
 
@@ -129,17 +130,20 @@ def init_db() -> None:
             if engine.dialect.name == "sqlite":
                 res = conn.exec_driver_sql("PRAGMA table_info(appointments);")
                 cols = [row[1] for row in res.fetchall()]
-                if "transcript" not in cols:
-                    conn.exec_driver_sql("ALTER TABLE appointments ADD COLUMN transcript TEXT;")
-                    conn.commit()
             elif engine.dialect.name == "postgresql":
                 res = conn.exec_driver_sql(
                     "SELECT column_name FROM information_schema.columns WHERE table_name='appointments';"
                 )
                 cols = [row[0] for row in res.fetchall()]
-                if "transcript" not in cols:
-                    conn.exec_driver_sql("ALTER TABLE appointments ADD COLUMN transcript TEXT;")
-                    conn.commit()
+            else:
+                cols = None
+
+            # Add columns introduced after the table was first created
+            if cols is not None:
+                for col, col_type in [("transcript", "TEXT"), ("call_id", "VARCHAR")]:
+                    if col not in cols:
+                        conn.exec_driver_sql(f"ALTER TABLE appointments ADD COLUMN {col} {col_type};")
+                        conn.commit()
     except Exception as e:
         print(f"Schema check error: {e}")
 

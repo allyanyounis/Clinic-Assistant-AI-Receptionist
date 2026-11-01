@@ -65,6 +65,7 @@ class AppointmentResponse(BaseModel):
     start_time: dt.datetime
     canceled: bool
     created_at: dt.datetime
+    transcript: Optional[str] = None
 
 
 class CancelAppointmentRequest(BaseModel):
@@ -388,6 +389,22 @@ def _parse_datetime_value(val: Any, time_val: Any = None) -> Optional[dt.datetim
     return None
 
 
+async def _extract_call_id(request: Request) -> Optional[str]:
+    """Extract the VAPI call ID (body["message"]["call"]["id"]) so a booking can be linked to its call transcript."""
+    try:
+        body = await request.json()  # Starlette caches the parsed body, so this does not re-read the stream
+    except Exception:
+        return None
+    if not isinstance(body, dict):
+        return None
+    for container in (body.get("message"), body):
+        if isinstance(container, dict) and isinstance(container.get("call"), dict):
+            call_id = container["call"].get("id")
+            if call_id:
+                return str(call_id)
+    return None
+
+
 async def _extract_tool_payload(request: Request) -> Tuple[dict, Optional[str], Optional[str]]:
     """Extract tool arguments, tool_call_id, and function name from incoming request.
 
@@ -555,6 +572,119 @@ def _extract_datetime_and_time(args: dict) -> Tuple[Optional[dt.datetime], Optio
 
 
 # ---------------------------------------------------------------------------
+# Slot Grid Helpers
+# ---------------------------------------------------------------------------
+DAY_NAMES = {0: "Monday", 1: "Tuesday", 2: "Wednesday", 3: "Thursday", 4: "Friday", 5: "Saturday", 6: "Sunday"}
+
+
+def _fmt_time(value: dt.datetime) -> str:
+    """Format a datetime as a spoken-friendly 12-hour time, e.g. '8:30 AM'."""
+    return value.strftime("%I:%M %p").lstrip("0")
+
+
+def _hours_text(settings: ClinicSettings) -> str:
+    """Human-readable clinic operating hours, e.g. '12:00 PM to 5:00 PM'."""
+    sh = settings.start_hour % 12 or 12
+    eh = settings.end_hour % 12 or 12
+    start_ampm = "AM" if settings.start_hour < 12 else "PM"
+    end_ampm = "AM" if settings.end_hour < 12 else "PM"
+    return f"{sh}:00 {start_ampm} to {eh}:00 {end_ampm}"
+
+
+def _working_days_text(settings: ClinicSettings) -> str:
+    """Human-readable working days, e.g. 'Monday, Tuesday, Wednesday'."""
+    ints = [int(d.strip()) for d in (settings.working_days or "").split(",") if d.strip().isdigit()]
+    names = [DAY_NAMES[d] for d in ints if d in DAY_NAMES]
+    return ", ".join(names) if names else "Monday through Friday"
+
+
+def _slot_minutes(settings: ClinicSettings) -> int:
+    """Slot length chosen by the doctor in Settings (falls back to 15 if unset or invalid)."""
+    return settings.slot_duration_minutes if settings.slot_duration_minutes and settings.slot_duration_minutes > 0 else 15
+
+
+def _is_clinic_open(settings: ClinicSettings, day: dt.date) -> bool:
+    """True if the clinic works on this date (a working weekday and not a holiday)."""
+    holidays = [h.strip() for h in (settings.holidays or "").split(",") if h.strip()]
+    working_days = [int(d.strip()) for d in (settings.working_days or "").split(",") if d.strip().isdigit()]
+    return day.isoformat() not in holidays and day.weekday() in working_days
+
+
+def _slot_grid(settings: ClinicSettings, day: dt.date) -> List[dt.datetime]:
+    """All bookable slot start times on a date: every slot length from opening time,
+    keeping only slots that finish by closing time.
+    e.g. 8 AM-6 PM with 15 min -> 8:00, 8:15 ... 5:45; 30 min -> 8:00, 8:30 ... 5:30; 45 min -> 8:00, 8:45 ... 5:15."""
+    step = dt.timedelta(minutes=_slot_minutes(settings))
+    current = dt.datetime.combine(day, dt.time(settings.start_hour, 0))
+    closing = dt.datetime.combine(day, dt.time(settings.end_hour, 0))
+    slots = []
+    while current + step <= closing:
+        slots.append(current)
+        current += step
+    return slots
+
+
+def _active_starts_on(db: Session, day: dt.date) -> List[dt.datetime]:
+    """Start times of all non-canceled appointments on a date."""
+    start_dt = dt.datetime.combine(day, dt.time.min)
+    return list(db.execute(
+        select(Appointment.start_time)
+        .where(Appointment.start_time >= start_dt)
+        .where(Appointment.start_time < start_dt + dt.timedelta(days=1))
+        .where(Appointment.canceled == False)
+    ).scalars().all())
+
+
+def _overlaps(slot: dt.datetime, booked_starts: List[dt.datetime], step: dt.timedelta) -> bool:
+    """True if any booked appointment overlaps this slot (also catches older off-grid bookings)."""
+    return any(abs(b - slot) < step for b in booked_starts)
+
+
+def _free_slots(db: Session, settings: ClinicSettings, day: dt.date) -> List[dt.datetime]:
+    """Free, not-yet-passed slots on a date (empty if the clinic is closed that day)."""
+    if not _is_clinic_open(settings, day):
+        return []
+    step = dt.timedelta(minutes=_slot_minutes(settings))
+    booked = _active_starts_on(db, day)
+    now = get_pakistan_now()
+    return [s for s in _slot_grid(settings, day) if s >= now and not _overlaps(s, booked, step)]
+
+
+def _nearest_free_slots_text(db: Session, settings: ClinicSettings, requested: dt.datetime) -> str:
+    """Sentence offering the closest free slots before and after the requested time on the same day."""
+    free = _free_slots(db, settings, requested.date())
+    if not free:
+        return f"There are no free slots left on {requested.strftime('%B %d, %Y')}. Please choose another day."
+    before = [s for s in free if s < requested]
+    after = [s for s in free if s >= requested]
+    options = ([before[-1]] if before else []) + after[:2 if not before else 1]
+    return "The nearest available times are " + " and ".join(_fmt_time(s) for s in options) + "."
+
+
+def _availability_summary(db: Session, settings: ClinicSettings, target_date: Optional[dt.date]) -> Tuple[str, List[str]]:
+    """Spoken availability summary for the AI receptionist, plus the free slot times for that date."""
+    now_str = get_pakistan_now().strftime("%A, %B %d, %Y at %I:%M %p PKT")
+    slot_minutes = _slot_minutes(settings)
+    base = (
+        f"Current Pakistan time is {now_str}. The doctor's clinic hours are {_hours_text(settings)} "
+        f"on {_working_days_text(settings)}. Appointments are booked only in fixed {slot_minutes}-minute slots "
+        f"counted from opening time; in-between times cannot be booked."
+    )
+
+    if not target_date:
+        return base + " Appointments can only be scheduled from today up to 10 days in advance.", []
+
+    date_text = target_date.strftime("%A, %B %d, %Y")
+    if not _is_clinic_open(settings, target_date):
+        return f"{base} The clinic is closed on {date_text}.", []
+
+    free = [_fmt_time(s) for s in _free_slots(db, settings, target_date)]
+    if not free:
+        return f"{base} There are no free slots left on {date_text}.", []
+    return f"{base} Free slots on {date_text}: {', '.join(free)}.", free
+
+
+# ---------------------------------------------------------------------------
 # Core Appointment Scheduling Logic
 # ---------------------------------------------------------------------------
 async def schedule_appointment_core(
@@ -562,7 +692,8 @@ async def schedule_appointment_core(
     reason: str,
     start_time: dt.datetime,
     tool_call_id: Optional[str],
-    db: Session
+    db: Session,
+    call_id: Optional[str] = None
 ):
     """Core scheduling function with full business rule enforcement.
 
@@ -622,17 +753,27 @@ async def schedule_appointment_core(
             f"The latest date you can book is {max_date.strftime('%B %d, %Y')}."
         )
 
-    # 4. Operating Hours Check
-    if start_time.hour < settings.start_hour or start_time.hour >= settings.end_hour:
-        start_ampm = "AM" if settings.start_hour < 12 else "PM"
-        end_ampm = "AM" if settings.end_hour < 12 else "PM"
-        sh = settings.start_hour % 12 or 12
-        eh = settings.end_hour % 12 or 12
+    # 4. Operating Hours Check (the whole slot must finish by closing time)
+    slot_minutes = _slot_minutes(settings)
+    step = dt.timedelta(minutes=slot_minutes)
+    grid = _slot_grid(settings, start_time.date())
+    opening = dt.datetime.combine(start_time.date(), dt.time(settings.start_hour, 0))
+    if not grid or start_time < opening or start_time > grid[-1]:
+        last_slot_text = f" The last appointment slot is at {_fmt_time(grid[-1])}." if grid else ""
         return respond_error(
             f"I'm sorry, but your requested appointment time of "
-            f"{start_time.strftime('%I:%M %p')} is outside clinic hours. "
-            f"The doctor is only available between {sh}:00 {start_ampm} and {eh}:00 {end_ampm}. "
+            f"{_fmt_time(start_time)} is outside clinic hours. "
+            f"The doctor is only available from {_hours_text(settings)}.{last_slot_text} "
             "Please choose a different time slot."
+        )
+
+    # 4b. Slot Grid Check: only times matching the doctor's slot length
+    # (e.g. 8:00 / 8:30 / 9:00 for 30-minute slots, 8:00 / 8:15 / 8:30 for 15-minute slots)
+    if start_time not in grid:
+        return respond_error(
+            f"I'm sorry, appointments are booked in fixed {slot_minutes}-minute slots, "
+            f"so {_fmt_time(start_time)} is not a valid slot. "
+            f"{_nearest_free_slots_text(db, settings, start_time)}"
         )
 
     # 5. Same-Person Duplicate Booking Check
@@ -650,18 +791,12 @@ async def schedule_appointment_core(
             "You cannot book the same slot twice. Please choose a different time."
         )
 
-    # 6. Slot Availability Check (no conflicting active booking)
-    existing_appointment = db.execute(
-        select(Appointment)
-        .where(Appointment.start_time == start_time)
-        .where(Appointment.canceled == False)
-    ).scalar_one_or_none()
-
-    if existing_appointment:
+    # 6. Slot Availability Check (no overlapping active booking, including older off-grid ones)
+    if _overlaps(start_time, _active_starts_on(db, start_time.date()), step):
         return respond_error(
-            f"I'm sorry, but the {start_time.strftime('%I:%M %p')} slot on "
+            f"I'm sorry, but the {_fmt_time(start_time)} slot on "
             f"{start_time.strftime('%B %d, %Y')} is already booked by another patient. "
-            "Please choose a different time slot."
+            f"{_nearest_free_slots_text(db, settings, start_time)}"
         )
 
     # Create and persist new appointment
@@ -669,6 +804,7 @@ async def schedule_appointment_core(
         patient_name=patient_name,
         reason=reason,
         start_time=start_time,
+        call_id=call_id,
     )
     db.add(new_appointment)
     db.commit()
@@ -853,7 +989,7 @@ async def schedule_appointment(request: Request, db: Session = Depends(get_db)):
             "results": [{"toolCallId": tool_call_id or "tool_call_result", "result": detail}]
         }
 
-    return await schedule_appointment_core(patient_name, reason, parsed_dt, tool_call_id, db)
+    return await schedule_appointment_core(patient_name, reason, parsed_dt, tool_call_id, db, call_id=await _extract_call_id(request))
 
 
 @app.post("/cancel_appointment")
@@ -910,47 +1046,18 @@ async def list_appointments(
             reason=appointment.reason,
             start_time=appointment.start_time,
             canceled=appointment.canceled,
-            created_at=appointment.created_at
+            created_at=appointment.created_at,
+            transcript=appointment.transcript
         ))
 
     settings = db.execute(select(ClinicSettings)).scalar_one_or_none()
     if not settings:
         settings = ClinicSettings()
 
-    start_ampm = "AM" if settings.start_hour < 12 else "PM"
-    end_ampm = "AM" if settings.end_hour < 12 else "PM"
-    sh = settings.start_hour % 12 or 12
-    eh = settings.end_hour % 12 or 12
-    hours_text = f"{sh}:00 {start_ampm} to {eh}:00 {end_ampm}"
-
-    day_map = {0: "Monday", 1: "Tuesday", 2: "Wednesday", 3: "Thursday", 4: "Friday", 5: "Saturday", 6: "Sunday"}
-    working_day_ints = [int(d.strip()) for d in settings.working_days.split(",") if d.strip().isdigit()]
-    working_day_names = [day_map[d] for d in working_day_ints if d in day_map]
-    working_days_text = ", ".join(working_day_names) if working_day_names else "Monday through Friday"
-
-    active_appts = [a for a in booked_appointments if not a.canceled]
-    now_pkt = get_pakistan_now()
-    now_str = now_pkt.strftime("%A, %B %d, %Y at %I:%M %p PKT")
-
-    if target_date:
-        if active_appts:
-            slots_str = ", ".join([a.start_time.strftime("%I:%M %p") for a in active_appts])
-            summary_text = (
-                f"Current Pakistan time is {now_str}. On {target_date.strftime('%B %d, %Y')}, "
-                f"the doctor's clinic hours are {hours_text} ({working_days_text}). "
-                f"Already booked slots: {slots_str}. All other slots during operating hours are open."
-            )
-        else:
-            summary_text = (
-                f"Current Pakistan time is {now_str}. On {target_date.strftime('%B %d, %Y')}, "
-                f"the doctor's clinic hours are {hours_text} ({working_days_text}). "
-                "All slots during operating hours are currently open."
-            )
-    else:
-        summary_text = (
-            f"Current Pakistan time is {now_str}. The doctor's working hours are {hours_text} on {working_days_text}. "
-            "Appointments can only be scheduled from today up to 10 days in advance."
-        )
+    hours_text = _hours_text(settings)
+    working_days_text = _working_days_text(settings)
+    slot_minutes = _slot_minutes(settings)
+    summary_text, available_slots = _availability_summary(db, settings, target_date)
 
     if tool_call_id:
         return {
@@ -962,7 +1069,8 @@ async def list_appointments(
             ],
             "doctor_available_hours": hours_text,
             "working_days": working_days_text,
-            "slot_duration_minutes": settings.slot_duration_minutes,
+            "slot_duration_minutes": slot_minutes,
+            "available_slots": available_slots,
             "summary": summary_text,
             "booked_appointments": booked_appointments,
             "appointments": booked_appointments
@@ -972,13 +1080,92 @@ async def list_appointments(
         return {
             "doctor_available_hours": hours_text,
             "working_days": working_days_text,
-            "slot_duration_minutes": settings.slot_duration_minutes,
+            "slot_duration_minutes": slot_minutes,
+            "available_slots": available_slots,
             "summary": summary_text,
             "booked_appointments": booked_appointments,
             "appointments": booked_appointments
         }
 
     return booked_appointments
+
+
+# ---------------------------------------------------------------------------
+# Call Transcript Handling (VAPI end-of-call-report)
+# ---------------------------------------------------------------------------
+def _format_transcript(report: dict) -> Optional[str]:
+    """Build a readable 'AI: ... / User: ...' transcript from a VAPI end-of-call-report message."""
+    artifact = report.get("artifact") if isinstance(report.get("artifact"), dict) else {}
+    messages = artifact.get("messages") or report.get("messages") or []
+
+    lines = []
+    for m in messages if isinstance(messages, list) else []:
+        if not isinstance(m, dict):
+            continue
+        role = m.get("role")
+        text = (m.get("message") or m.get("content") or "").strip()
+        if not text or role not in ("bot", "assistant", "user"):
+            continue  # skip system prompt, tool calls and tool results
+        lines.append(f"{'User' if role == 'user' else 'AI'}: {text}")
+    if lines:
+        return "\n".join(lines)
+
+    # Fallback: VAPI's ready-made plain-text transcript
+    transcript = artifact.get("transcript") or report.get("transcript")
+    return transcript.strip() if isinstance(transcript, str) and transcript.strip() else None
+
+
+def _to_pkt_naive(value: Any) -> Optional[dt.datetime]:
+    """Convert a VAPI ISO timestamp (UTC, e.g. '2026-11-01T14:36:10.123Z') to naive Pakistan time, matching stored times."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone(PKT).replace(tzinfo=None)
+
+
+async def _save_call_transcript(report: dict, db: Session) -> dict:
+    """Attach the call transcript to every appointment booked during that call."""
+    call = report.get("call") if isinstance(report.get("call"), dict) else {}
+    call_id = call.get("id")
+    transcript = _format_transcript(report)
+    if not call_id or not transcript:
+        print(f"[VAPI TRANSCRIPT] Skipped: call_id={call_id}, has_transcript={bool(transcript)}")
+        return {"status": "ok", "saved": 0}
+
+    appointments = db.execute(select(Appointment).where(Appointment.call_id == str(call_id))).scalars().all()
+
+    # "API Request" tools don't send the call ID, so fall back to appointments booked during the call
+    if not appointments:
+        window_start = _to_pkt_naive(report.get("startedAt") or call.get("startedAt") or call.get("createdAt"))
+        window_end = _to_pkt_naive(report.get("endedAt") or call.get("endedAt")) or get_pakistan_now()
+        if window_start:
+            margin = dt.timedelta(minutes=1)
+            appointments = db.execute(
+                select(Appointment)
+                .where(Appointment.created_at >= window_start - margin)
+                .where(Appointment.created_at <= window_end + margin)
+                .where(Appointment.call_id.is_(None))
+                .where(Appointment.transcript.is_(None))
+            ).scalars().all()
+            for appointment in appointments:
+                appointment.call_id = str(call_id)
+
+    for appointment in appointments:
+        appointment.transcript = transcript
+    db.commit()
+    print(f"[VAPI TRANSCRIPT] call_id={call_id}: saved to {len(appointments)} appointment(s)")
+
+    if appointments:
+        try:
+            await manager.broadcast("transcript_saved")
+        except Exception:
+            pass
+    return {"status": "ok", "saved": len(appointments)}
 
 
 # ---------------------------------------------------------------------------
@@ -995,6 +1182,15 @@ def health_check():
 @app.post("/vapi")
 async def vapi_webhook_router(request: Request, db: Session = Depends(get_db)):
     """General webhook router for VAPI if configured to hit root server URL."""
+    # End-of-call report: save the transcript (handled before tool parsing to avoid logging the huge payload)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    message = body.get("message") if isinstance(body, dict) else None
+    if isinstance(message, dict) and message.get("type") == "end-of-call-report":
+        return await _save_call_transcript(message, db)
+
     args, tool_call_id, func_name = await _extract_tool_payload(request)
     print(f"[VAPI] [VAPI GENERAL ROUTER] func={func_name}, tool_call_id={tool_call_id}, args={args}")
 
@@ -1018,7 +1214,7 @@ async def vapi_webhook_router(request: Request, db: Session = Depends(get_db)):
                     }
                 ]
             }
-        return await schedule_appointment_core(patient_name, reason, parsed_dt, tool_call_id, db)
+        return await schedule_appointment_core(patient_name, reason, parsed_dt, tool_call_id, db, call_id=await _extract_call_id(request))
 
     elif "cancel" in func_lower:
         return await cancel_appointment_core(args, tool_call_id, db)
@@ -1027,16 +1223,7 @@ async def vapi_webhook_router(request: Request, db: Session = Depends(get_db)):
         date_arg = args.get("date") or args.get("start_time")
         target_date = _parse_date_value(date_arg)
         settings = db.execute(select(ClinicSettings)).scalar_one_or_none() or ClinicSettings()
-        start_ampm = "AM" if settings.start_hour < 12 else "PM"
-        end_ampm = "AM" if settings.end_hour < 12 else "PM"
-        sh = settings.start_hour % 12 or 12
-        eh = settings.end_hour % 12 or 12
-        hours_text = f"{sh}:00 {start_ampm} to {eh}:00 {end_ampm}"
-        day_map = {0: "Monday", 1: "Tuesday", 2: "Wednesday", 3: "Thursday", 4: "Friday", 5: "Saturday", 6: "Sunday"}
-        working_day_ints = [int(d.strip()) for d in settings.working_days.split(",") if d.strip().isdigit()]
-        working_day_names = [day_map[d] for d in working_day_ints if d in day_map]
-        working_days_text = ", ".join(working_day_names) if working_day_names else "Monday through Friday"
-        summary = f"The doctor is available between {hours_text} on {working_days_text}."
+        summary, _ = _availability_summary(db, settings, target_date)
         return {
             "results": [
                 {
