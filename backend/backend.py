@@ -25,7 +25,7 @@ import uvicorn
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from database.database import Appointment, ClinicSettings, User, get_db, init_db
+from database.database import Appointment, ClinicSettings, User, get_db, init_db, get_pakistan_now, PKT
 
 # ---------------------------------------------------------------------------
 # Security & Password Utilities
@@ -211,7 +211,7 @@ def login(request: LoginRequest, db: Session = Depends(get_db)):
 # Clinic Settings Endpoints
 # ---------------------------------------------------------------------------
 @app.get("/settings", response_model=ClinicSettingsResponse)
-@app.get("/settings/", response_model=ClinicSettingsResponse)
+@app.get("/settings/", response_model=ClinicSettingsResponse, include_in_schema=False)
 def get_settings(db: Session = Depends(get_db)):
     """Fetch current clinic operating hours, working days, and holidays."""
     settings = db.execute(select(ClinicSettings)).scalar_one_or_none()
@@ -231,7 +231,7 @@ def get_settings(db: Session = Depends(get_db)):
 
 
 @app.post("/settings", response_model=ClinicSettingsResponse)
-@app.post("/settings/", response_model=ClinicSettingsResponse)
+@app.post("/settings/", response_model=ClinicSettingsResponse, include_in_schema=False)
 def update_settings(request: UpdateClinicSettingsRequest, db: Session = Depends(get_db)):
     """Update clinic schedule configuration."""
     try:
@@ -295,7 +295,7 @@ def _parse_date_value(val: Any) -> Optional[dt.date]:
         except Exception:
             pass
 
-        now_year = dt.datetime.now().year
+        now_year = get_pakistan_now().year
         formats = [
             "%Y-%m-%d",
             "%Y/%m/%d",
@@ -332,11 +332,13 @@ def _parse_date_value(val: Any) -> Optional[dt.date]:
 
 
 def _parse_datetime_value(val: Any, time_val: Any = None) -> Optional[dt.datetime]:
-    """Parse datetime from ISO strings, combined date+time, or naive datetime."""
+    """Parse datetime from ISO strings, combined date+time, or naive datetime, converted to PKT."""
     if not val:
         return None
     if isinstance(val, dt.datetime):
-        return val.replace(tzinfo=None) if val.tzinfo else val
+        if val.tzinfo:
+            return val.astimezone(PKT).replace(tzinfo=None)
+        return val
     if isinstance(val, dt.date):
         if time_val:
             parsed_time = _parse_time_value(str(time_val))
@@ -347,6 +349,9 @@ def _parse_datetime_value(val: Any, time_val: Any = None) -> Optional[dt.datetim
     if isinstance(val, str):
         val = val.strip()
         clean_val = val
+        # The AI receptionist operates exclusively in Pakistan Standard Time (PKT).
+        # Models often append 'Z' by convention, which would falsely offset PKT by +5h if treated as UTC.
+        # Simply strip 'Z' / 'z' so the patient's requested hour remains in local Pakistan Time.
         if clean_val.endswith("Z") or clean_val.endswith("z"):
             clean_val = clean_val[:-1]
 
@@ -387,55 +392,47 @@ async def _extract_tool_payload(request: Request) -> Tuple[dict, Optional[str], 
     """Extract tool arguments, tool_call_id, and function name from incoming request.
 
     Supports:
-    - VAPI webhook payload: body["message"]["toolCalls"]
+    - VAPI webhook payload: body["message"]["toolCalls"] / toolCallList / toolWithToolCallList
     - VAPI direct toolCall: body["toolCall"] or body["toolCalls"]
     - Standard REST payload: body
     """
     try:
         body = await request.json()
-    except Exception:
+    except Exception as e:
         body = {}
+    print(f"[VAPI RAW INCOMING] URL={request.url.path}, body={body}")
 
     tool_call_id = None
     func_name = None
     args = {}
 
     if isinstance(body, dict):
+        tool_calls = None
         if "message" in body and isinstance(body["message"], dict):
             msg = body["message"]
-            tool_calls = msg.get("toolCalls") or msg.get("tools") or []
-            if tool_calls and isinstance(tool_calls, list) and len(tool_calls) > 0:
-                first_tool = tool_calls[0]
-                tool_call_id = first_tool.get("id")
-                fn = first_tool.get("function", {})
-                func_name = fn.get("name")
-                raw_args = fn.get("arguments", {})
-                if isinstance(raw_args, str):
-                    try:
-                        args = json.loads(raw_args)
-                    except Exception:
-                        args = {}
-                elif isinstance(raw_args, dict):
-                    args = raw_args
+            tool_calls = (
+                msg.get("toolCalls")
+                or msg.get("toolCallList")
+                or msg.get("toolWithToolCallList")
+                or msg.get("tools")
+            )
+        elif "toolCalls" in body and isinstance(body["toolCalls"], list):
+            tool_calls = body["toolCalls"]
+        elif "toolCallList" in body and isinstance(body["toolCallList"], list):
+            tool_calls = body["toolCallList"]
         elif "toolCall" in body and isinstance(body["toolCall"], dict):
-            tc = body["toolCall"]
-            tool_call_id = tc.get("id")
-            fn = tc.get("function", {})
-            func_name = fn.get("name")
-            raw_args = fn.get("arguments", {})
-            if isinstance(raw_args, str):
-                try:
-                    args = json.loads(raw_args)
-                except Exception:
-                    args = {}
-            elif isinstance(raw_args, dict):
-                args = raw_args
-        elif "toolCalls" in body and isinstance(body["toolCalls"], list) and len(body["toolCalls"]) > 0:
-            tc = body["toolCalls"][0]
-            tool_call_id = tc.get("id")
-            fn = tc.get("function", {})
-            func_name = fn.get("name")
-            raw_args = fn.get("arguments", {})
+            tool_calls = [body["toolCall"]]
+
+        if tool_calls and isinstance(tool_calls, list) and len(tool_calls) > 0:
+            first_tool = tool_calls[0]
+            tool_call_id = first_tool.get("id") or first_tool.get("toolCallId")
+            fn = first_tool.get("function") or first_tool
+            func_name = fn.get("name") if isinstance(fn, dict) else None
+            raw_args = (
+                (fn.get("arguments") or fn.get("parameters"))
+                if isinstance(fn, dict)
+                else {}
+            )
             if isinstance(raw_args, str):
                 try:
                     args = json.loads(raw_args)
@@ -446,7 +443,115 @@ async def _extract_tool_payload(request: Request) -> Tuple[dict, Optional[str], 
         else:
             args = body
 
+    # Unnest / unwrap nested parameter dicts if present
+    if isinstance(args, dict):
+        unwrapped = dict(args)
+        for nested_key in ["parameters", "arguments", "input", "body", "properties"]:
+            if nested_key in unwrapped and isinstance(unwrapped[nested_key], dict):
+                unwrapped.update(unwrapped[nested_key])
+        args = unwrapped
+
     return args, tool_call_id, func_name
+
+
+def _extract_patient_name(args: dict) -> Optional[str]:
+    """Extract patient name reliably across multiple naming conventions and nested payloads."""
+    if not isinstance(args, dict):
+        return None
+
+    # Priority direct keys
+    priority_keys = [
+        "patient_name", "patientName", "patient_full_name", "patientFullName",
+        "full_name", "fullName", "name", "patient", "caller_name", "callerName",
+        "user_name", "userName", "customer_name", "customerName", "client_name", "clientName"
+    ]
+    for k in priority_keys:
+        val = args.get(k)
+        if val and isinstance(val, str) and val.strip():
+            cleaned = val.strip()
+            if cleaned.lower() not in ["none", "null", "undefined", "unknown", "n/a", "caller", "user"]:
+                return cleaned
+
+    # Case-insensitive / fuzzy key search across dict
+    for k, val in args.items():
+        if isinstance(k, str) and isinstance(val, str) and val.strip():
+            k_lower = k.lower().replace("-", "_").replace(" ", "_")
+            if any(term in k_lower for term in ["name", "patient", "caller", "client", "customer"]):
+                cleaned = val.strip()
+                if cleaned.lower() not in ["none", "null", "undefined", "unknown", "n/a", "caller", "user", "general consultation"]:
+                    return cleaned
+
+    # Search nested dictionaries
+    for v in args.values():
+        if isinstance(v, dict):
+            nested = _extract_patient_name(v)
+            if nested:
+                return nested
+
+    return None
+
+
+def _extract_datetime_and_time(args: dict) -> Tuple[Optional[dt.datetime], Optional[str]]:
+    """Extract appointment datetime and time string across multiple conventions."""
+    if not isinstance(args, dict):
+        return None, None
+
+    dt_keys = [
+        "start_time", "startTime", "appointment_datetime", "appointment_time_and_date",
+        "datetime", "dateTime", "date_time", "start", "appointment_time", "slot"
+    ]
+    date_keys = ["date", "appointment_date", "day", "target_date"]
+    time_keys = ["time", "appointment_time", "slot", "preferred_time", "time_slot"]
+
+    raw_dt = None
+    for k in dt_keys:
+        if args.get(k):
+            raw_dt = args.get(k)
+            break
+
+    raw_date = None
+    for k in date_keys:
+        if args.get(k):
+            raw_date = args.get(k)
+            break
+
+    raw_time = None
+    for k in time_keys:
+        if args.get(k):
+            raw_time = args.get(k)
+            break
+
+    # If raw_date or raw_dt is a phrase like "today" or "tomorrow"
+    now_pkt = get_pakistan_now()
+    if isinstance(raw_date, str):
+        lowered = raw_date.lower().strip()
+        if "today" in lowered:
+            raw_date = now_pkt.date().isoformat()
+        elif "tomorrow" in lowered:
+            raw_date = (now_pkt.date() + dt.timedelta(days=1)).isoformat()
+
+    if isinstance(raw_dt, str):
+        lowered = raw_dt.lower().strip()
+        if "today" in lowered:
+            raw_dt = raw_dt.replace("today", now_pkt.date().isoformat()).replace("Today", now_pkt.date().isoformat())
+        elif "tomorrow" in lowered:
+            raw_dt = raw_dt.replace("tomorrow", (now_pkt.date() + dt.timedelta(days=1)).isoformat()).replace("Tomorrow", (now_pkt.date() + dt.timedelta(days=1)).isoformat())
+
+    parsed_dt = _parse_datetime_value(raw_dt or raw_date, time_val=raw_time)
+    if parsed_dt:
+        return parsed_dt, raw_time
+
+    # Deep scan all values in args
+    for v in args.values():
+        if isinstance(v, str):
+            p = _parse_datetime_value(v, time_val=raw_time)
+            if p:
+                return p, raw_time
+            d = _parse_date_value(v)
+            if d:
+                return _parse_datetime_value(d, time_val=raw_time), raw_time
+
+    return None, raw_time
 
 
 # ---------------------------------------------------------------------------
@@ -470,16 +575,21 @@ async def schedule_appointment_core(
         settings = ClinicSettings()
 
     def respond_error(detail: str):
-        if tool_call_id:
-            return {
-                "results": [
-                    {
-                        "toolCallId": tool_call_id,
-                        "result": detail
-                    }
-                ]
-            }
-        raise HTTPException(status_code=400, detail=detail)
+        # Always return HTTP 200 with result/detail so VAPI AI voice receptionist
+        # receives the explanation to speak to the user, instead of triggering generic technical error fallback!
+        return {
+            "success": False,
+            "status": "error",
+            "message": detail,
+            "detail": detail,
+            "result": detail,
+            "results": [
+                {
+                    "toolCallId": tool_call_id or "tool_call_result",
+                    "result": detail
+                }
+            ]
+        }
 
     req_date_str = start_time.strftime('%Y-%m-%d')
     holidays = [h.strip() for h in settings.holidays.split(',')] if settings.holidays else []
@@ -497,8 +607,8 @@ async def schedule_appointment_core(
             "Please choose a valid working day."
         )
 
-    # 3. Booking Window Check (not in the past, within 10 days)
-    current_dt = dt.datetime.now()
+    # 3. Booking Window Check (not in the past, within 10 days - in Pakistan Time)
+    current_dt = get_pakistan_now()
     if start_time < current_dt - dt.timedelta(minutes=15):
         return respond_error(
             "I'm sorry, but you cannot book an appointment in the past. "
@@ -576,30 +686,26 @@ async def schedule_appointment_core(
         f"{new_appointment.start_time.strftime('%I:%M %p')} for {new_appointment.reason}."
     )
 
-    if tool_call_id:
-        return {
-            "results": [
-                {
-                    "toolCallId": tool_call_id,
-                    "result": success_msg
-                }
-            ],
-            "id": new_appointment.id,
-            "patient_name": new_appointment.patient_name,
-            "reason": new_appointment.reason,
-            "start_time": new_appointment.start_time,
-            "canceled": new_appointment.canceled,
-            "created_at": new_appointment.created_at
-        }
-
-    return AppointmentResponse(
-        id=new_appointment.id,
-        patient_name=new_appointment.patient_name,
-        reason=new_appointment.reason,
-        start_time=new_appointment.start_time,
-        canceled=new_appointment.canceled,
-        created_at=new_appointment.created_at
-    )
+    # Return universal response compatible with VAPI apiRequest and REST clients
+    return {
+        "success": True,
+        "status": "success",
+        "message": success_msg,
+        "detail": success_msg,
+        "result": success_msg,
+        "results": [
+            {
+                "toolCallId": tool_call_id or "tool_call_result",
+                "result": success_msg
+            }
+        ],
+        "id": new_appointment.id,
+        "patient_name": new_appointment.patient_name,
+        "reason": new_appointment.reason,
+        "start_time": new_appointment.start_time.isoformat(),
+        "canceled": new_appointment.canceled,
+        "created_at": new_appointment.created_at.isoformat()
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -611,9 +717,9 @@ async def cancel_appointment_core(
     db: Session
 ):
     """Core cancellation function supporting flexible date/time/name lookups."""
-    patient_name = args.get("patient_name") or args.get("patientName") or args.get("name")
-    date_raw = args.get("date") or args.get("start_time") or args.get("startTime") or args.get("datetime")
-    target_date = _parse_date_value(date_raw)
+    patient_name = _extract_patient_name(args)
+    parsed_dt, raw_time = _extract_datetime_and_time(args)
+    target_date = _parse_date_value(args.get("date") or args.get("start_time") or args.get("startTime") or (parsed_dt.date() if parsed_dt else None))
 
     # If date was not parsed directly from expected keys, scan all string values in args
     if not target_date:
@@ -626,9 +732,15 @@ async def cancel_appointment_core(
 
     if not target_date:
         detail = "Please specify the date of the appointment you wish to cancel."
-        if tool_call_id:
-            return {"results": [{"toolCallId": tool_call_id, "result": detail}]}
-        raise HTTPException(status_code=400, detail=detail)
+        return {
+            "success": False,
+            "status": "error",
+            "message": detail,
+            "detail": detail,
+            "result": detail,
+            "results": [{"toolCallId": tool_call_id or "tool_call_result", "result": detail}],
+            "canceled_count": 0
+        }
 
     start_dt = dt.datetime.combine(target_date, dt.time.min)
     end_dt = start_dt + dt.timedelta(days=1)
@@ -668,9 +780,15 @@ async def cancel_appointment_core(
             detail += f" for {patient_name}."
         else:
             detail += "."
-        if tool_call_id:
-            return {"results": [{"toolCallId": tool_call_id, "result": detail}]}
-        raise HTTPException(status_code=404, detail=detail)
+        return {
+            "success": False,
+            "status": "not_found",
+            "message": detail,
+            "detail": detail,
+            "result": detail,
+            "results": [{"toolCallId": tool_call_id or "tool_call_result", "result": detail}],
+            "canceled_count": 0
+        }
 
     for appointment in appointments:
         appointment.canceled = True
@@ -683,69 +801,81 @@ async def cancel_appointment_core(
         pass
 
     success_msg = f"Your appointment on {target_date.strftime('%B %d, %Y')} has been successfully canceled."
-    if tool_call_id:
-        return {
-            "results": [
-                {
-                    "toolCallId": tool_call_id,
-                    "result": success_msg
-                }
-            ],
-            "canceled_count": len(appointments)
-        }
-
-    return CancelAppointmentResponse(canceled_count=len(appointments))
+    return {
+        "success": True,
+        "status": "success",
+        "message": success_msg,
+        "detail": success_msg,
+        "result": success_msg,
+        "results": [
+            {
+                "toolCallId": tool_call_id or "tool_call_result",
+                "result": success_msg
+            }
+        ],
+        "canceled_count": len(appointments)
+    }
 
 
 # ---------------------------------------------------------------------------
 # Appointment Management Endpoints
 # ---------------------------------------------------------------------------
 @app.post("/schedule_appointment")
-@app.post("/schedule_appointment/")
+@app.post("/schedule_appointment/", include_in_schema=False)
 async def schedule_appointment(request: Request, db: Session = Depends(get_db)):
     """Schedule a new appointment, accepting direct REST or VAPI tool-call requests."""
     args, tool_call_id, func_name = await _extract_tool_payload(request)
-    print(f"📡 [VAPI/API SCHEDULE] func={func_name}, tool_call_id={tool_call_id}, args={args}")
+    print(f"[VAPI] [VAPI/API SCHEDULE] func={func_name}, tool_call_id={tool_call_id}, args={args}")
 
-    patient_name = args.get("patient_name") or args.get("patientName") or args.get("name")
+    patient_name = _extract_patient_name(args)
     reason = args.get("reason") or args.get("notes") or args.get("details") or "General Consultation"
-
-    start_time_raw = args.get("start_time") or args.get("startTime") or args.get("datetime")
-    time_raw = args.get("time")
-    date_raw = args.get("date")
-
-    parsed_dt = _parse_datetime_value(start_time_raw or date_raw, time_val=time_raw)
+    parsed_dt, raw_time = _extract_datetime_and_time(args)
 
     if not patient_name:
         detail = "Patient name is required to book an appointment."
-        if tool_call_id:
-            return {"results": [{"toolCallId": tool_call_id, "result": detail}]}
-        raise HTTPException(status_code=400, detail=detail)
+        return {
+            "success": False,
+            "status": "error",
+            "message": detail,
+            "detail": detail,
+            "result": detail,
+            "results": [{"toolCallId": tool_call_id or "tool_call_result", "result": detail}]
+        }
 
     if not parsed_dt:
         detail = "A valid appointment date and time is required."
-        if tool_call_id:
-            return {"results": [{"toolCallId": tool_call_id, "result": detail}]}
-        raise HTTPException(status_code=400, detail=detail)
+        return {
+            "success": False,
+            "status": "error",
+            "message": detail,
+            "detail": detail,
+            "result": detail,
+            "results": [{"toolCallId": tool_call_id or "tool_call_result", "result": detail}]
+        }
 
     return await schedule_appointment_core(patient_name, reason, parsed_dt, tool_call_id, db)
 
 
 @app.post("/cancel_appointment")
-@app.post("/cancel_appointment/")
+@app.post("/cancel_appointment/", include_in_schema=False)
+@app.post("/cancel_appointments", include_in_schema=False)
+@app.post("/cancel_appointments/", include_in_schema=False)
 async def cancel_appointment(request: Request, db: Session = Depends(get_db)):
     """Cancel existing appointments for a patient on a specific date."""
     args, tool_call_id, func_name = await _extract_tool_payload(request)
-    print(f"📡 [VAPI/API CANCEL] func={func_name}, tool_call_id={tool_call_id}, args={args}")
+    print(f"[VAPI] [VAPI/API CANCEL] func={func_name}, tool_call_id={tool_call_id}, args={args}")
 
     return await cancel_appointment_core(args, tool_call_id, db)
 
 
-@app.api_route("/check_doctor_availability", methods=["GET", "POST"])
-@app.api_route("/check_doctor_availability/", methods=["GET", "POST"])
-@app.api_route("/doctor_availability", methods=["GET", "POST"])
 @app.api_route("/list_appointments", methods=["GET", "POST"])
-@app.api_route("/list_appointments/", methods=["GET", "POST"])
+@app.api_route("/list_appointments/", methods=["GET", "POST"], include_in_schema=False)
+@app.api_route("/check_doctor_availability", methods=["GET", "POST"], include_in_schema=False)
+@app.api_route("/check_doctor_availability/", methods=["GET", "POST"], include_in_schema=False)
+@app.api_route("/check_doctor_availabilty", methods=["GET", "POST"], include_in_schema=False)
+@app.api_route("/check_doctor_availabilty/", methods=["GET", "POST"], include_in_schema=False)
+@app.api_route("/doctor_availability", methods=["GET", "POST"], include_in_schema=False)
+@app.api_route("/doctor_availability/", methods=["GET", "POST"], include_in_schema=False)
 async def list_appointments(
     request: Request,
     date: str | None = None,
@@ -758,7 +888,7 @@ async def list_appointments(
     if request.method == "POST":
         args, tool_call_id, func_name = await _extract_tool_payload(request)
         if tool_call_id:
-            print(f"📡 [VAPI AVAILABILITY] func={func_name}, tool_call_id={tool_call_id}, args={args}")
+            print(f"[VAPI] [VAPI AVAILABILITY] func={func_name}, tool_call_id={tool_call_id}, args={args}")
         if not target_date:
             date_arg = args.get("date") or args.get("start_time")
             target_date = _parse_date_value(date_arg)
@@ -799,20 +929,28 @@ async def list_appointments(
     working_days_text = ", ".join(working_day_names) if working_day_names else "Monday through Friday"
 
     active_appts = [a for a in booked_appointments if not a.canceled]
+    now_pkt = get_pakistan_now()
+    now_str = now_pkt.strftime("%A, %B %d, %Y at %I:%M %p PKT")
+
     if target_date:
         if active_appts:
             slots_str = ", ".join([a.start_time.strftime("%I:%M %p") for a in active_appts])
             summary_text = (
-                f"On {target_date.strftime('%B %d, %Y')}, doctor available hours are {hours_text}. "
-                f"Already booked slots: {slots_str}. All other slots are available."
+                f"Current Pakistan time is {now_str}. On {target_date.strftime('%B %d, %Y')}, "
+                f"the doctor's clinic hours are {hours_text} ({working_days_text}). "
+                f"Already booked slots: {slots_str}. All other slots during operating hours are open."
             )
         else:
             summary_text = (
-                f"On {target_date.strftime('%B %d, %Y')}, doctor available hours are {hours_text}. "
-                "All slots are currently open."
+                f"Current Pakistan time is {now_str}. On {target_date.strftime('%B %d, %Y')}, "
+                f"the doctor's clinic hours are {hours_text} ({working_days_text}). "
+                "All slots during operating hours are currently open."
             )
     else:
-        summary_text = f"The doctor is available between {hours_text} on {working_days_text}."
+        summary_text = (
+            f"Current Pakistan time is {now_str}. The doctor's working hours are {hours_text} on {working_days_text}. "
+            "Appointments can only be scheduled from today up to 10 days in advance."
+        )
 
     if tool_call_id:
         return {
@@ -858,7 +996,7 @@ def health_check():
 async def vapi_webhook_router(request: Request, db: Session = Depends(get_db)):
     """General webhook router for VAPI if configured to hit root server URL."""
     args, tool_call_id, func_name = await _extract_tool_payload(request)
-    print(f"📡 [VAPI GENERAL ROUTER] func={func_name}, tool_call_id={tool_call_id}, args={args}")
+    print(f"[VAPI] [VAPI GENERAL ROUTER] func={func_name}, tool_call_id={tool_call_id}, args={args}")
 
     if not tool_call_id and not func_name:
         return {"status": "ok", "message": "DocAssist AI Backend is active and running"}

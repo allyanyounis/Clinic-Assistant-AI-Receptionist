@@ -149,7 +149,7 @@ export function MainChartArea({
                     <h4 className="text-base font-medium text-gray-800 mb-6">10-Day Appointment Trends</h4>
                     <div className="h-[300px] w-full overflow-hidden">
                         {mounted && (
-                        <ResponsiveContainer width="100%" height={300}>
+                        <ResponsiveContainer width="100%" height={300} minWidth={0} minHeight={300} initialDimension={{ width: 1, height: 300 }}>
                             <BarChart data={chartData} margin={{ top: 20, right: 30, left: -20, bottom: 0 }}>
                                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f0f0f0" />
                                 <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fill: '#8c8c8c', fontSize: 12 }} dy={10} />

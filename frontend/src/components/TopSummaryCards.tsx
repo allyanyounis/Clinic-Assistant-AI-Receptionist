@@ -78,7 +78,7 @@ export function TopSummaryCards({
                 </div>
 
                 <div className="h-12 mt-2">
-                    <ResponsiveContainer width="100%" height="100%">
+                    <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={48} initialDimension={{ width: 1, height: 48 }}>
                         <BarChart data={paymentsData}>
                             <Tooltip cursor={{ fill: 'transparent' }} contentStyle={{ display: 'none' }} />
                             <Bar dataKey="uv" fill="#8B2635" barSize={12} radius={[2, 2, 0, 0]} />

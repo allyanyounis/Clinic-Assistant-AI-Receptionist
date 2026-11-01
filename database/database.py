@@ -57,7 +57,7 @@ else:
         prefix = safe_url.split("@")[0].rsplit(":", 1)[0]
         suffix = safe_url.split("@")[1]
         safe_url = f"{prefix}:****@{suffix}"
-    print(f"🐘 [DB INFO] Connected to POSTGRESQL: {safe_url}")
+    print(f"[DB INFO] Connected to POSTGRESQL: {safe_url}")
 
     engine = create_engine(
         DATABASE_URL,
@@ -66,6 +66,17 @@ else:
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+
+
+# ---------------------------------------------------------------------------
+# Pakistan Standard Time (PKT, UTC+5) Helper
+# ---------------------------------------------------------------------------
+PKT = dt.timezone(dt.timedelta(hours=5), name="PKT")
+
+
+def get_pakistan_now() -> dt.datetime:
+    """Return the current date and time in Pakistan Standard Time (PKT, UTC+5) as a naive datetime."""
+    return dt.datetime.now(PKT).replace(tzinfo=None)
 
 
 # ---------------------------------------------------------------------------
@@ -81,7 +92,7 @@ class Appointment(Base):
     start_time = Column(DateTime, index=True)
     canceled = Column(Boolean, default=False)
     transcript = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=dt.datetime.utcnow)
+    created_at = Column(DateTime, default=get_pakistan_now)
 
 
 class ClinicSettings(Base):
@@ -104,7 +115,7 @@ class User(Base):
     name = Column(String)
     email = Column(String, unique=True, index=True)
     password_hash = Column(String)
-    created_at = Column(DateTime, default=dt.datetime.utcnow)
+    created_at = Column(DateTime, default=get_pakistan_now)
 
 
 # ---------------------------------------------------------------------------
