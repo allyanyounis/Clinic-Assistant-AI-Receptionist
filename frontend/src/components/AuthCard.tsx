@@ -74,14 +74,14 @@ export function AuthCard() {
                     className={`flex-1 pb-4 text-sm font-semibold transition-colors relative ${isSignIn ? "text-slate-900" : "text-slate-400 hover:text-slate-600"}`}
                 >
                     Sign In
-                    {isSignIn && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-[#8B2635] rounded-full" />}
+                    {isSignIn && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-brand-700 rounded-full" />}
                 </button>
                 <button 
                     onClick={() => setIsSignIn(false)}
                     className={`flex-1 pb-4 text-sm font-semibold transition-colors relative ${!isSignIn ? "text-slate-900" : "text-slate-400 hover:text-slate-600"}`}
                 >
                     Sign Up
-                    {!isSignIn && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-[#8B2635] rounded-full" />}
+                    {!isSignIn && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-brand-700 rounded-full" />}
                 </button>
             </div>
 
@@ -107,7 +107,7 @@ export function AuthCard() {
                             value={formData.name}
                             onChange={handleInputChange}
                             placeholder="Enter your full name"
-                            className="w-full px-4 py-2.5 rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-[#8B2635]/20 focus:border-[#8B2635] transition-all bg-white text-slate-900"
+                            className="w-full px-4 py-2.5 rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-brand-700/20 focus:border-brand-700 transition-all bg-white text-slate-900"
                         />
                     </div>
                 )}
@@ -121,7 +121,7 @@ export function AuthCard() {
                         value={formData.email}
                         onChange={handleInputChange}
                         placeholder="Enter your email"
-                        className="w-full px-4 py-2.5 rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-[#8B2635]/20 focus:border-[#8B2635] transition-all bg-white text-slate-900"
+                        className="w-full px-4 py-2.5 rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-brand-700/20 focus:border-brand-700 transition-all bg-white text-slate-900"
                     />
                 </div>
 
@@ -129,7 +129,7 @@ export function AuthCard() {
                     <div className="flex justify-between items-center mb-1.5">
                         <label className="block text-sm font-medium text-slate-700">Password</label>
                         {isSignIn && (
-                            <button type="button" className="text-xs font-medium text-slate-500 hover:text-[#8B2635] transition-colors">
+                            <button type="button" className="text-xs font-medium text-slate-500 hover:text-brand-700 transition-colors">
                                 Forgot Password?
                             </button>
                         )}
@@ -142,7 +142,7 @@ export function AuthCard() {
                             value={formData.password}
                             onChange={handleInputChange}
                             placeholder="Enter your password"
-                            className="w-full px-4 py-2.5 rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-[#8B2635]/20 focus:border-[#8B2635] transition-all bg-white text-slate-900"
+                            className="w-full px-4 py-2.5 rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-brand-700/20 focus:border-brand-700 transition-all bg-white text-slate-900"
                         />
                         <button 
                             type="button"
@@ -157,7 +157,7 @@ export function AuthCard() {
                 <button 
                     type="submit"
                     disabled={loading}
-                    className="w-full bg-[#53131D] hover:bg-[#6B1925] text-white font-semibold py-3 rounded-lg shadow-md transition-all active:scale-[0.98] mt-2 disabled:opacity-70 disabled:cursor-not-allowed"
+                    className="w-full bg-brand-950 hover:bg-brand-800 text-white font-semibold py-3 rounded-lg shadow-md transition-all active:scale-[0.98] mt-2 disabled:opacity-70 disabled:cursor-not-allowed"
                 >
                     {loading ? "Processing..." : (isSignIn ? "Sign In" : "Create Account")}
                 </button>
@@ -168,7 +168,7 @@ export function AuthCard() {
                     {isSignIn ? "Don't have an account? " : "Already have an account? "}
                     <button 
                         onClick={() => setIsSignIn(!isSignIn)}
-                        className="text-[#8B2635] font-semibold hover:underline"
+                        className="text-brand-700 font-semibold hover:underline"
                     >
                         {isSignIn ? "Sign up" : "Sign in"}
                     </button>

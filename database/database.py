@@ -106,6 +106,9 @@ class ClinicSettings(Base):
     slot_duration_minutes = Column(Integer, default=15)  # 15 min default
     working_days = Column(String, default="0,1,2,3,4,5") # Mon(0) to Sat(5)
     holidays = Column(String, default="")                # Comma-separated 'YYYY-MM-DD' dates
+    # JSON list of 7 days (Mon..Sun): {"enabled", "start": "HH:MM", "end": "HH:MM", "breaks": [{"start", "end"}]}.
+    # NULL until the doctor saves the Scheduler; until then the hours above apply to every working day.
+    weekly_schedule = Column(Text, nullable=True)
 
 
 class User(Base):
@@ -125,24 +128,28 @@ class User(Base):
 def init_db() -> None:
     """Create all tables in the database and ensure column schema is up to date."""
     Base.metadata.create_all(bind=engine)
+    # Columns introduced after each table was first created
+    new_columns = {
+        "appointments": [("transcript", "TEXT"), ("call_id", "VARCHAR")],
+        "settings": [("weekly_schedule", "TEXT")],
+    }
     try:
         with engine.connect() as conn:
-            if engine.dialect.name == "sqlite":
-                res = conn.exec_driver_sql("PRAGMA table_info(appointments);")
-                cols = [row[1] for row in res.fetchall()]
-            elif engine.dialect.name == "postgresql":
-                res = conn.exec_driver_sql(
-                    "SELECT column_name FROM information_schema.columns WHERE table_name='appointments';"
-                )
-                cols = [row[0] for row in res.fetchall()]
-            else:
-                cols = None
+            for table, columns in new_columns.items():
+                if engine.dialect.name == "sqlite":
+                    res = conn.exec_driver_sql(f"PRAGMA table_info({table});")
+                    cols = [row[1] for row in res.fetchall()]
+                elif engine.dialect.name == "postgresql":
+                    res = conn.exec_driver_sql(
+                        f"SELECT column_name FROM information_schema.columns WHERE table_name='{table}';"
+                    )
+                    cols = [row[0] for row in res.fetchall()]
+                else:
+                    continue
 
-            # Add columns introduced after the table was first created
-            if cols is not None:
-                for col, col_type in [("transcript", "TEXT"), ("call_id", "VARCHAR")]:
+                for col, col_type in columns:
                     if col not in cols:
-                        conn.exec_driver_sql(f"ALTER TABLE appointments ADD COLUMN {col} {col_type};")
+                        conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {col} {col_type};")
                         conn.commit()
     except Exception as e:
         print(f"Schema check error: {e}")

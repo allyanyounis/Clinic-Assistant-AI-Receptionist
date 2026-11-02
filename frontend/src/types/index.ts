@@ -13,12 +13,28 @@ export interface Appointment {
     transcript?: string | null;
 }
 
+export interface BreakPeriod {
+    start: string; // "HH:MM"
+    end: string;
+}
+
+export interface DaySchedule {
+    enabled: boolean;
+    start: string; // "HH:MM"
+    end: string;
+    breaks: BreakPeriod[];
+}
+
 export interface ClinicSettings {
     start_hour: number;
     end_hour: number;
     slot_duration_minutes: number;
     working_days: string;
     holidays: string;
+    /** 7 entries, index 0 = Monday. */
+    weekly_schedule: DaySchedule[];
+    /** True until the doctor has saved per-day hours. */
+    is_default_schedule: boolean;
 }
 
 export interface UserSession {

@@ -18,8 +18,8 @@ export default function LoginPage() {
             {/* Logo */}
             <div className="relative mb-10 flex flex-col items-center gap-1 group">
                 <div className="flex items-center gap-3">
-                    <Stethoscope className="w-8 h-8 text-[#53131D] group-hover:scale-110 transition-transform duration-300" />
-                    <span className="text-3xl font-bold tracking-tight text-[#53131D]">DocAssist AI</span>
+                    <Stethoscope className="w-8 h-8 text-brand-950 group-hover:scale-110 transition-transform duration-300" />
+                    <span className="text-3xl font-bold tracking-tight text-brand-950">DocAssist AI</span>
                 </div>
             </div>
 
@@ -31,9 +31,9 @@ export default function LoginPage() {
             {/* Footer */}
             <footer className="relative mt-12 text-center text-slate-500 z-10">
                 <div className="flex gap-6 justify-center mb-3">
-                    <button className="text-xs font-medium hover:text-[#8B2635] transition-colors">Privacy Policy</button>
-                    <button className="text-xs font-medium hover:text-[#8B2635] transition-colors">Terms of Service</button>
-                    <button className="text-xs font-medium hover:text-[#8B2635] transition-colors">About</button>
+                    <button className="text-xs font-medium hover:text-brand-700 transition-colors">Privacy Policy</button>
+                    <button className="text-xs font-medium hover:text-brand-700 transition-colors">Terms of Service</button>
+                    <button className="text-xs font-medium hover:text-brand-700 transition-colors">About</button>
                 </div>
                 <p className="text-[10px] uppercase tracking-widest font-semibold text-slate-400">
                     © 2026 DocAssist AI. All rights reserved.

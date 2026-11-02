@@ -4,19 +4,21 @@ Handles patient appointment scheduling, cancellation, listing,
 clinic configuration, and user authentication with WebSocket support.
 Supports direct REST calls from Next.js dashboard as well as
 VAPI AI Voice Agent tool calls and webhook payloads.
+
+This file is the web layer (app, middleware and endpoints). The logic lives in:
+  schemas.py     request/response models
+  parsing.py     reading dates, times, names and VAPI tool-call payloads
+  scheduling.py  clinic hours, breaks, slot grid and availability
+  services.py    booking, cancelling, call transcripts, WebSocket updates, passwords
 """
 
 import datetime as dt
 import json
 import os
-import re
 import sys
-from typing import List, Optional, Tuple, Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from passlib.context import CryptContext
-from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 import uvicorn
@@ -25,95 +27,25 @@ import uvicorn
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from database.database import Appointment, ClinicSettings, User, get_db, init_db, get_pakistan_now, PKT
-
-# ---------------------------------------------------------------------------
-# Security & Password Utilities
-# ---------------------------------------------------------------------------
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-
-def get_password_hash(password: str) -> str:
-    """Hash password using bcrypt, truncated to 72 bytes to avoid passlib limit."""
-    return pwd_context.hash(password[:72])
-
-
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verify plain password against hashed password."""
-    return pwd_context.verify(plain_password[:72], hashed_password)
-
+from database.database import Appointment, ClinicSettings, User, get_db, init_db
+from schemas import (
+    AppointmentResponse, ClinicSettingsResponse, LoginRequest, SignUpRequest, UpdateClinicSettingsRequest, UserResponse,
+)
+from parsing import (
+    _extract_call_id, _extract_datetime_and_time, _extract_patient_name, _extract_tool_payload,
+    _parse_date_value, _parse_datetime_value,
+)
+from scheduling import (
+    _availability_summary, _hours_text, _load_settings, _settings_response, _slot_minutes, _tool_reply,
+    _validate_weekly_schedule, _working_days_text,
+)
+from services import (
+    _save_call_transcript, cancel_appointment_core, get_password_hash, manager, schedule_appointment_core,
+    verify_password,
+)
 
 # Initialize SQLite / PostgreSQL database tables on startup
 init_db()
-
-
-# ---------------------------------------------------------------------------
-# Pydantic Schemas / Data Contracts
-# ---------------------------------------------------------------------------
-
-# --- Appointment Schemas ---
-class AppointmentRequest(BaseModel):
-    patient_name: str
-    reason: Optional[str] = "General Consultation"
-    start_time: dt.datetime
-
-
-class AppointmentResponse(BaseModel):
-    id: int
-    patient_name: str
-    reason: Optional[str] = None
-    start_time: dt.datetime
-    canceled: bool
-    created_at: dt.datetime
-    transcript: Optional[str] = None
-
-
-class CancelAppointmentRequest(BaseModel):
-    patient_name: Optional[str] = None
-    date: dt.date
-
-
-class CancelAppointmentResponse(BaseModel):
-    canceled_count: int
-
-
-class ListAppointmentRequest(BaseModel):
-    date: Optional[dt.date] = None
-
-
-# --- Clinic Settings Schemas ---
-class ClinicSettingsResponse(BaseModel):
-    start_hour: int = Field(..., ge=0, le=23)
-    end_hour: int = Field(..., ge=0, le=23)
-    slot_duration_minutes: int
-    working_days: str
-    holidays: str
-
-
-class UpdateClinicSettingsRequest(BaseModel):
-    start_hour: int = Field(..., ge=0, le=23)
-    end_hour: int = Field(..., ge=0, le=23)
-    slot_duration_minutes: int
-    working_days: str
-    holidays: str
-
-
-# --- Authentication Schemas ---
-class SignUpRequest(BaseModel):
-    name: str
-    email: str
-    password: str
-
-
-class LoginRequest(BaseModel):
-    email: str
-    password: str
-
-
-class UserResponse(BaseModel):
-    name: str
-    email: str
-    isLoggedIn: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -131,36 +63,8 @@ app.add_middleware(
 
 
 # ---------------------------------------------------------------------------
-# WebSocket Real-Time Connection Manager
+# WebSocket Real-Time Endpoint
 # ---------------------------------------------------------------------------
-class ConnectionManager:
-    """Manages active WebSocket client connections for real-time notifications."""
-
-    def __init__(self):
-        self.active_connections: List[WebSocket] = []
-
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.append(websocket)
-
-    def disconnect(self, websocket: WebSocket):
-        if websocket in self.active_connections:
-            self.active_connections.remove(websocket)
-
-    async def send_personal_message(self, message: str, websocket: WebSocket):
-        await websocket.send_text(message)
-
-    async def broadcast(self, message: str):
-        for connection in list(self.active_connections):
-            try:
-                await connection.send_text(message)
-            except Exception:
-                self.disconnect(connection)
-
-
-manager = ConnectionManager()
-
-
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """WebSocket endpoint for real-time communication."""
@@ -222,19 +126,15 @@ def get_settings(db: Session = Depends(get_db)):
         db.commit()
         db.refresh(settings)
 
-    return ClinicSettingsResponse(
-        start_hour=settings.start_hour,
-        end_hour=settings.end_hour,
-        slot_duration_minutes=settings.slot_duration_minutes,
-        working_days=settings.working_days,
-        holidays=settings.holidays
-    )
+    return _settings_response(settings)
 
 
 @app.post("/settings", response_model=ClinicSettingsResponse)
 @app.post("/settings/", response_model=ClinicSettingsResponse, include_in_schema=False)
 def update_settings(request: UpdateClinicSettingsRequest, db: Session = Depends(get_db)):
     """Update clinic schedule configuration."""
+    if request.weekly_schedule is not None:
+        _validate_weekly_schedule(request.weekly_schedule)
     try:
         settings = db.execute(select(ClinicSettings)).scalars().first()
         if not settings:
@@ -247,710 +147,23 @@ def update_settings(request: UpdateClinicSettingsRequest, db: Session = Depends(
         settings.working_days = request.working_days
         settings.holidays = request.holidays
 
+        if request.weekly_schedule is not None:
+            # Keep the summary columns in sync so older screens (dashboard, receptionist) still read correctly
+            enabled = [(i, d) for i, d in enumerate(request.weekly_schedule) if d.enabled]
+            settings.weekly_schedule = json.dumps([d.model_dump() for d in request.weekly_schedule])
+            settings.working_days = ",".join(str(i) for i, _ in enabled)
+            if enabled:
+                settings.start_hour = min(int(d.start[:2]) for _, d in enabled)
+                settings.end_hour = min(23, max(int(d.end[:2]) + (d.end[3:] != "00") for _, d in enabled))
+
         db.commit()
         db.refresh(settings)
 
-        return settings
+        return _settings_response(settings)
     except Exception as e:
         print(f"Error in update_settings: {e}")
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
-
-
-# ---------------------------------------------------------------------------
-# Parsing and Payload Extraction Helpers
-# ---------------------------------------------------------------------------
-def _parse_time_value(time_str: str) -> Optional[dt.time]:
-    """Parse time string in multiple common formats."""
-    if not time_str or not isinstance(time_str, str):
-        return None
-    time_str = time_str.strip().upper()
-    for fmt in ["%I:%M %p", "%I:%M%p", "%I %p", "%I%p", "%H:%M:%S", "%H:%M"]:
-        try:
-            return dt.datetime.strptime(time_str, fmt).time()
-        except ValueError:
-            pass
-    return None
-
-
-def _parse_date_value(val: Any) -> Optional[dt.date]:
-    """Safely parse date from date object, datetime object, or natural string (e.g. '2 November', 'November 2', '2026-11-02')."""
-    if not val:
-        return None
-    if isinstance(val, dt.datetime):
-        return val.date()
-    if isinstance(val, dt.date):
-        return val
-    if isinstance(val, str):
-        val = val.strip()
-        # Clean ordinal suffixes: 1st, 2nd, 3rd, 4th
-        clean_val = re.sub(r'(\d+)(st|nd|rd|th)', r'\1', val, flags=re.IGNORECASE).strip()
-
-        # Handle ISO timestamp format (e.g. 2026-11-02T15:00:00)
-        if "T" in clean_val:
-            clean_val = clean_val.split("T")[0]
-
-        # Try standard ISO
-        try:
-            return dt.date.fromisoformat(clean_val)
-        except Exception:
-            pass
-
-        now_year = get_pakistan_now().year
-        formats = [
-            "%Y-%m-%d",
-            "%Y/%m/%d",
-            "%m/%d/%Y",
-            "%d/%m/%Y",
-            "%d %B %Y",
-            "%B %d, %Y",
-            "%B %d %Y",
-            "%d %b %Y",
-            "%b %d, %Y",
-            "%b %d %Y",
-            "%d %B",
-            "%B %d",
-            "%d %b",
-            "%b %d",
-        ]
-        for fmt in formats:
-            try:
-                parsed = dt.datetime.strptime(clean_val, fmt).date()
-                if "%Y" not in fmt and "%y" not in fmt:
-                    parsed = parsed.replace(year=now_year)
-                return parsed
-            except ValueError:
-                pass
-
-        if " " in clean_val:
-            date_part = clean_val.split(" ")[0]
-            try:
-                return dt.date.fromisoformat(date_part)
-            except Exception:
-                pass
-
-    return None
-
-
-def _parse_datetime_value(val: Any, time_val: Any = None) -> Optional[dt.datetime]:
-    """Parse datetime from ISO strings, combined date+time, or naive datetime, converted to PKT."""
-    if not val:
-        return None
-    if isinstance(val, dt.datetime):
-        if val.tzinfo:
-            return val.astimezone(PKT).replace(tzinfo=None)
-        return val
-    if isinstance(val, dt.date):
-        if time_val:
-            parsed_time = _parse_time_value(str(time_val))
-            if parsed_time:
-                return dt.datetime.combine(val, parsed_time)
-        return dt.datetime.combine(val, dt.time(12, 0))
-
-    if isinstance(val, str):
-        val = val.strip()
-        clean_val = val
-        # The AI receptionist operates exclusively in Pakistan Standard Time (PKT).
-        # Models often append 'Z' by convention, which would falsely offset PKT by +5h if treated as UTC.
-        # Simply strip 'Z' / 'z' so the patient's requested hour remains in local Pakistan Time.
-        if clean_val.endswith("Z") or clean_val.endswith("z"):
-            clean_val = clean_val[:-1]
-
-        for fmt in [
-            "%Y-%m-%dT%H:%M:%S.%f",
-            "%Y-%m-%dT%H:%M:%S",
-            "%Y-%m-%dT%H:%M",
-            "%Y-%m-%d %H:%M:%S",
-            "%Y-%m-%d %H:%M",
-            "%Y-%m-%d",
-        ]:
-            try:
-                parsed = dt.datetime.strptime(clean_val, fmt)
-                if fmt == "%Y-%m-%d" and time_val:
-                    parsed_time = _parse_time_value(str(time_val))
-                    if parsed_time:
-                        return dt.datetime.combine(parsed.date(), parsed_time)
-                return parsed
-            except ValueError:
-                pass
-
-        try:
-            parsed = dt.datetime.fromisoformat(clean_val)
-            return parsed.replace(tzinfo=None) if parsed.tzinfo else parsed
-        except Exception:
-            pass
-
-        # Try parsing natural date with optional time
-        p_date = _parse_date_value(clean_val)
-        if p_date:
-            p_time = _parse_time_value(str(time_val)) if time_val else dt.time(12, 0)
-            return dt.datetime.combine(p_date, p_time or dt.time(12, 0))
-
-    return None
-
-
-async def _extract_call_id(request: Request) -> Optional[str]:
-    """Extract the VAPI call ID (body["message"]["call"]["id"]) so a booking can be linked to its call transcript."""
-    try:
-        body = await request.json()  # Starlette caches the parsed body, so this does not re-read the stream
-    except Exception:
-        return None
-    if not isinstance(body, dict):
-        return None
-    for container in (body.get("message"), body):
-        if isinstance(container, dict) and isinstance(container.get("call"), dict):
-            call_id = container["call"].get("id")
-            if call_id:
-                return str(call_id)
-    return None
-
-
-async def _extract_tool_payload(request: Request) -> Tuple[dict, Optional[str], Optional[str]]:
-    """Extract tool arguments, tool_call_id, and function name from incoming request.
-
-    Supports:
-    - VAPI webhook payload: body["message"]["toolCalls"] / toolCallList / toolWithToolCallList
-    - VAPI direct toolCall: body["toolCall"] or body["toolCalls"]
-    - Standard REST payload: body
-    """
-    try:
-        body = await request.json()
-    except Exception as e:
-        body = {}
-    print(f"[VAPI RAW INCOMING] URL={request.url.path}, body={body}")
-
-    tool_call_id = None
-    func_name = None
-    args = {}
-
-    if isinstance(body, dict):
-        tool_calls = None
-        if "message" in body and isinstance(body["message"], dict):
-            msg = body["message"]
-            tool_calls = (
-                msg.get("toolCalls")
-                or msg.get("toolCallList")
-                or msg.get("toolWithToolCallList")
-                or msg.get("tools")
-            )
-        elif "toolCalls" in body and isinstance(body["toolCalls"], list):
-            tool_calls = body["toolCalls"]
-        elif "toolCallList" in body and isinstance(body["toolCallList"], list):
-            tool_calls = body["toolCallList"]
-        elif "toolCall" in body and isinstance(body["toolCall"], dict):
-            tool_calls = [body["toolCall"]]
-
-        if tool_calls and isinstance(tool_calls, list) and len(tool_calls) > 0:
-            first_tool = tool_calls[0]
-            tool_call_id = first_tool.get("id") or first_tool.get("toolCallId")
-            fn = first_tool.get("function") or first_tool
-            func_name = fn.get("name") if isinstance(fn, dict) else None
-            raw_args = (
-                (fn.get("arguments") or fn.get("parameters"))
-                if isinstance(fn, dict)
-                else {}
-            )
-            if isinstance(raw_args, str):
-                try:
-                    args = json.loads(raw_args)
-                except Exception:
-                    args = {}
-            elif isinstance(raw_args, dict):
-                args = raw_args
-        else:
-            args = body
-
-    # Unnest / unwrap nested parameter dicts if present
-    if isinstance(args, dict):
-        unwrapped = dict(args)
-        for nested_key in ["parameters", "arguments", "input", "body", "properties"]:
-            if nested_key in unwrapped and isinstance(unwrapped[nested_key], dict):
-                unwrapped.update(unwrapped[nested_key])
-        args = unwrapped
-
-    return args, tool_call_id, func_name
-
-
-def _extract_patient_name(args: dict) -> Optional[str]:
-    """Extract patient name reliably across multiple naming conventions and nested payloads."""
-    if not isinstance(args, dict):
-        return None
-
-    # Priority direct keys
-    priority_keys = [
-        "patient_name", "patientName", "patient_full_name", "patientFullName",
-        "full_name", "fullName", "name", "patient", "caller_name", "callerName",
-        "user_name", "userName", "customer_name", "customerName", "client_name", "clientName"
-    ]
-    for k in priority_keys:
-        val = args.get(k)
-        if val and isinstance(val, str) and val.strip():
-            cleaned = val.strip()
-            if cleaned.lower() not in ["none", "null", "undefined", "unknown", "n/a", "caller", "user"]:
-                return cleaned
-
-    # Case-insensitive / fuzzy key search across dict
-    for k, val in args.items():
-        if isinstance(k, str) and isinstance(val, str) and val.strip():
-            k_lower = k.lower().replace("-", "_").replace(" ", "_")
-            if any(term in k_lower for term in ["name", "patient", "caller", "client", "customer"]):
-                cleaned = val.strip()
-                if cleaned.lower() not in ["none", "null", "undefined", "unknown", "n/a", "caller", "user", "general consultation"]:
-                    return cleaned
-
-    # Search nested dictionaries
-    for v in args.values():
-        if isinstance(v, dict):
-            nested = _extract_patient_name(v)
-            if nested:
-                return nested
-
-    return None
-
-
-def _extract_datetime_and_time(args: dict) -> Tuple[Optional[dt.datetime], Optional[str]]:
-    """Extract appointment datetime and time string across multiple conventions."""
-    if not isinstance(args, dict):
-        return None, None
-
-    dt_keys = [
-        "start_time", "startTime", "appointment_datetime", "appointment_time_and_date",
-        "datetime", "dateTime", "date_time", "start", "appointment_time", "slot"
-    ]
-    date_keys = ["date", "appointment_date", "day", "target_date"]
-    time_keys = ["time", "appointment_time", "slot", "preferred_time", "time_slot"]
-
-    raw_dt = None
-    for k in dt_keys:
-        if args.get(k):
-            raw_dt = args.get(k)
-            break
-
-    raw_date = None
-    for k in date_keys:
-        if args.get(k):
-            raw_date = args.get(k)
-            break
-
-    raw_time = None
-    for k in time_keys:
-        if args.get(k):
-            raw_time = args.get(k)
-            break
-
-    # If raw_date or raw_dt is a phrase like "today" or "tomorrow"
-    now_pkt = get_pakistan_now()
-    if isinstance(raw_date, str):
-        lowered = raw_date.lower().strip()
-        if "today" in lowered:
-            raw_date = now_pkt.date().isoformat()
-        elif "tomorrow" in lowered:
-            raw_date = (now_pkt.date() + dt.timedelta(days=1)).isoformat()
-
-    if isinstance(raw_dt, str):
-        lowered = raw_dt.lower().strip()
-        if "today" in lowered:
-            raw_dt = raw_dt.replace("today", now_pkt.date().isoformat()).replace("Today", now_pkt.date().isoformat())
-        elif "tomorrow" in lowered:
-            raw_dt = raw_dt.replace("tomorrow", (now_pkt.date() + dt.timedelta(days=1)).isoformat()).replace("Tomorrow", (now_pkt.date() + dt.timedelta(days=1)).isoformat())
-
-    parsed_dt = _parse_datetime_value(raw_dt or raw_date, time_val=raw_time)
-    if parsed_dt:
-        return parsed_dt, raw_time
-
-    # Deep scan all values in args
-    for v in args.values():
-        if isinstance(v, str):
-            p = _parse_datetime_value(v, time_val=raw_time)
-            if p:
-                return p, raw_time
-            d = _parse_date_value(v)
-            if d:
-                return _parse_datetime_value(d, time_val=raw_time), raw_time
-
-    return None, raw_time
-
-
-# ---------------------------------------------------------------------------
-# Slot Grid Helpers
-# ---------------------------------------------------------------------------
-DAY_NAMES = {0: "Monday", 1: "Tuesday", 2: "Wednesday", 3: "Thursday", 4: "Friday", 5: "Saturday", 6: "Sunday"}
-
-
-def _fmt_time(value: dt.datetime) -> str:
-    """Format a datetime as a spoken-friendly 12-hour time, e.g. '8:30 AM'."""
-    return value.strftime("%I:%M %p").lstrip("0")
-
-
-def _hours_text(settings: ClinicSettings) -> str:
-    """Human-readable clinic operating hours, e.g. '12:00 PM to 5:00 PM'."""
-    sh = settings.start_hour % 12 or 12
-    eh = settings.end_hour % 12 or 12
-    start_ampm = "AM" if settings.start_hour < 12 else "PM"
-    end_ampm = "AM" if settings.end_hour < 12 else "PM"
-    return f"{sh}:00 {start_ampm} to {eh}:00 {end_ampm}"
-
-
-def _working_days_text(settings: ClinicSettings) -> str:
-    """Human-readable working days, e.g. 'Monday, Tuesday, Wednesday'."""
-    ints = [int(d.strip()) for d in (settings.working_days or "").split(",") if d.strip().isdigit()]
-    names = [DAY_NAMES[d] for d in ints if d in DAY_NAMES]
-    return ", ".join(names) if names else "Monday through Friday"
-
-
-def _slot_minutes(settings: ClinicSettings) -> int:
-    """Slot length chosen by the doctor in Settings (falls back to 15 if unset or invalid)."""
-    return settings.slot_duration_minutes if settings.slot_duration_minutes and settings.slot_duration_minutes > 0 else 15
-
-
-def _is_clinic_open(settings: ClinicSettings, day: dt.date) -> bool:
-    """True if the clinic works on this date (a working weekday and not a holiday)."""
-    holidays = [h.strip() for h in (settings.holidays or "").split(",") if h.strip()]
-    working_days = [int(d.strip()) for d in (settings.working_days or "").split(",") if d.strip().isdigit()]
-    return day.isoformat() not in holidays and day.weekday() in working_days
-
-
-def _slot_grid(settings: ClinicSettings, day: dt.date) -> List[dt.datetime]:
-    """All bookable slot start times on a date: every slot length from opening time,
-    keeping only slots that finish by closing time.
-    e.g. 8 AM-6 PM with 15 min -> 8:00, 8:15 ... 5:45; 30 min -> 8:00, 8:30 ... 5:30; 45 min -> 8:00, 8:45 ... 5:15."""
-    step = dt.timedelta(minutes=_slot_minutes(settings))
-    current = dt.datetime.combine(day, dt.time(settings.start_hour, 0))
-    closing = dt.datetime.combine(day, dt.time(settings.end_hour, 0))
-    slots = []
-    while current + step <= closing:
-        slots.append(current)
-        current += step
-    return slots
-
-
-def _active_starts_on(db: Session, day: dt.date) -> List[dt.datetime]:
-    """Start times of all non-canceled appointments on a date."""
-    start_dt = dt.datetime.combine(day, dt.time.min)
-    return list(db.execute(
-        select(Appointment.start_time)
-        .where(Appointment.start_time >= start_dt)
-        .where(Appointment.start_time < start_dt + dt.timedelta(days=1))
-        .where(Appointment.canceled == False)
-    ).scalars().all())
-
-
-def _overlaps(slot: dt.datetime, booked_starts: List[dt.datetime], step: dt.timedelta) -> bool:
-    """True if any booked appointment overlaps this slot (also catches older off-grid bookings)."""
-    return any(abs(b - slot) < step for b in booked_starts)
-
-
-def _free_slots(db: Session, settings: ClinicSettings, day: dt.date) -> List[dt.datetime]:
-    """Free, not-yet-passed slots on a date (empty if the clinic is closed that day)."""
-    if not _is_clinic_open(settings, day):
-        return []
-    step = dt.timedelta(minutes=_slot_minutes(settings))
-    booked = _active_starts_on(db, day)
-    now = get_pakistan_now()
-    return [s for s in _slot_grid(settings, day) if s >= now and not _overlaps(s, booked, step)]
-
-
-def _nearest_free_slots_text(db: Session, settings: ClinicSettings, requested: dt.datetime) -> str:
-    """Sentence offering the closest free slots before and after the requested time on the same day."""
-    free = _free_slots(db, settings, requested.date())
-    if not free:
-        return f"There are no free slots left on {requested.strftime('%B %d, %Y')}. Please choose another day."
-    before = [s for s in free if s < requested]
-    after = [s for s in free if s >= requested]
-    options = ([before[-1]] if before else []) + after[:2 if not before else 1]
-    return "The nearest available times are " + " and ".join(_fmt_time(s) for s in options) + "."
-
-
-def _availability_summary(db: Session, settings: ClinicSettings, target_date: Optional[dt.date]) -> Tuple[str, List[str]]:
-    """Spoken availability summary for the AI receptionist, plus the free slot times for that date."""
-    now_str = get_pakistan_now().strftime("%A, %B %d, %Y at %I:%M %p PKT")
-    slot_minutes = _slot_minutes(settings)
-    base = (
-        f"Current Pakistan time is {now_str}. The doctor's clinic hours are {_hours_text(settings)} "
-        f"on {_working_days_text(settings)}. Appointments are booked only in fixed {slot_minutes}-minute slots "
-        f"counted from opening time; in-between times cannot be booked."
-    )
-
-    if not target_date:
-        return base + " Appointments can only be scheduled from today up to 10 days in advance.", []
-
-    date_text = target_date.strftime("%A, %B %d, %Y")
-    if not _is_clinic_open(settings, target_date):
-        return f"{base} The clinic is closed on {date_text}.", []
-
-    free = [_fmt_time(s) for s in _free_slots(db, settings, target_date)]
-    if not free:
-        return f"{base} There are no free slots left on {date_text}.", []
-    return f"{base} Free slots on {date_text}: {', '.join(free)}.", free
-
-
-# ---------------------------------------------------------------------------
-# Core Appointment Scheduling Logic
-# ---------------------------------------------------------------------------
-async def schedule_appointment_core(
-    patient_name: str,
-    reason: str,
-    start_time: dt.datetime,
-    tool_call_id: Optional[str],
-    db: Session,
-    call_id: Optional[str] = None
-):
-    """Core scheduling function with full business rule enforcement.
-
-    For VAPI voice callers (tool_call_id present), validation failures are returned
-    as 200 responses with the message in 'results' so the AI Receptionist can read
-    the friendly explanation to the caller rather than triggering a technical error fallback.
-    """
-    settings = db.execute(select(ClinicSettings)).scalar_one_or_none()
-    if not settings:
-        settings = ClinicSettings()
-
-    def respond_error(detail: str):
-        # Always return HTTP 200 with result/detail so VAPI AI voice receptionist
-        # receives the explanation to speak to the user, instead of triggering generic technical error fallback!
-        return {
-            "success": False,
-            "status": "error",
-            "message": detail,
-            "detail": detail,
-            "result": detail,
-            "results": [
-                {
-                    "toolCallId": tool_call_id or "tool_call_result",
-                    "result": detail
-                }
-            ]
-        }
-
-    req_date_str = start_time.strftime('%Y-%m-%d')
-    holidays = [h.strip() for h in settings.holidays.split(',')] if settings.holidays else []
-
-    # 1. Holiday Check
-    if req_date_str in holidays:
-        return respond_error(f"I'm sorry, but the clinic is closed for a holiday on {start_time.strftime('%B %d, %Y')}.")
-
-    # 2. Working Days Check (0=Monday ... 6=Sunday)
-    working_days = [int(d.strip()) for d in settings.working_days.split(',')] if settings.working_days else []
-    if start_time.weekday() not in working_days:
-        return respond_error(
-            f"I'm sorry, but the clinic is closed on this day of the week. "
-            f"{start_time.strftime('%B %d, %Y')} falls on a non-working day. "
-            "Please choose a valid working day."
-        )
-
-    # 3. Booking Window Check (not in the past, within 10 days - in Pakistan Time)
-    current_dt = get_pakistan_now()
-    if start_time < current_dt - dt.timedelta(minutes=15):
-        return respond_error(
-            "I'm sorry, but you cannot book an appointment in the past. "
-            "Please choose a date and time today or up to 10 days from today."
-        )
-
-    if start_time.date() > current_dt.date() + dt.timedelta(days=10):
-        max_date = current_dt.date() + dt.timedelta(days=10)
-        return respond_error(
-            f"I'm sorry, but appointments can only be booked up to 10 days in advance. "
-            f"The latest date you can book is {max_date.strftime('%B %d, %Y')}."
-        )
-
-    # 4. Operating Hours Check (the whole slot must finish by closing time)
-    slot_minutes = _slot_minutes(settings)
-    step = dt.timedelta(minutes=slot_minutes)
-    grid = _slot_grid(settings, start_time.date())
-    opening = dt.datetime.combine(start_time.date(), dt.time(settings.start_hour, 0))
-    if not grid or start_time < opening or start_time > grid[-1]:
-        last_slot_text = f" The last appointment slot is at {_fmt_time(grid[-1])}." if grid else ""
-        return respond_error(
-            f"I'm sorry, but your requested appointment time of "
-            f"{_fmt_time(start_time)} is outside clinic hours. "
-            f"The doctor is only available from {_hours_text(settings)}.{last_slot_text} "
-            "Please choose a different time slot."
-        )
-
-    # 4b. Slot Grid Check: only times matching the doctor's slot length
-    # (e.g. 8:00 / 8:30 / 9:00 for 30-minute slots, 8:00 / 8:15 / 8:30 for 15-minute slots)
-    if start_time not in grid:
-        return respond_error(
-            f"I'm sorry, appointments are booked in fixed {slot_minutes}-minute slots, "
-            f"so {_fmt_time(start_time)} is not a valid slot. "
-            f"{_nearest_free_slots_text(db, settings, start_time)}"
-        )
-
-    # 5. Same-Person Duplicate Booking Check
-    same_person_booking = db.execute(
-        select(Appointment)
-        .where(Appointment.patient_name == patient_name)
-        .where(Appointment.start_time == start_time)
-        .where(Appointment.canceled == False)
-    ).scalar_one_or_none()
-
-    if same_person_booking:
-        return respond_error(
-            f"It looks like {patient_name} already has an appointment "
-            f"on {start_time.strftime('%B %d, %Y')} at {start_time.strftime('%I:%M %p')}. "
-            "You cannot book the same slot twice. Please choose a different time."
-        )
-
-    # 6. Slot Availability Check (no overlapping active booking, including older off-grid ones)
-    if _overlaps(start_time, _active_starts_on(db, start_time.date()), step):
-        return respond_error(
-            f"I'm sorry, but the {_fmt_time(start_time)} slot on "
-            f"{start_time.strftime('%B %d, %Y')} is already booked by another patient. "
-            f"{_nearest_free_slots_text(db, settings, start_time)}"
-        )
-
-    # Create and persist new appointment
-    new_appointment = Appointment(
-        patient_name=patient_name,
-        reason=reason,
-        start_time=start_time,
-        call_id=call_id,
-    )
-    db.add(new_appointment)
-    db.commit()
-    db.refresh(new_appointment)
-
-    # Broadcast event to frontend via WebSocket
-    try:
-        await manager.broadcast("new_appointment")
-    except Exception:
-        pass
-
-    success_msg = (
-        f"Appointment confirmed for {new_appointment.patient_name} on "
-        f"{new_appointment.start_time.strftime('%B %d, %Y')} at "
-        f"{new_appointment.start_time.strftime('%I:%M %p')} for {new_appointment.reason}."
-    )
-
-    # Return universal response compatible with VAPI apiRequest and REST clients
-    return {
-        "success": True,
-        "status": "success",
-        "message": success_msg,
-        "detail": success_msg,
-        "result": success_msg,
-        "results": [
-            {
-                "toolCallId": tool_call_id or "tool_call_result",
-                "result": success_msg
-            }
-        ],
-        "id": new_appointment.id,
-        "patient_name": new_appointment.patient_name,
-        "reason": new_appointment.reason,
-        "start_time": new_appointment.start_time.isoformat(),
-        "canceled": new_appointment.canceled,
-        "created_at": new_appointment.created_at.isoformat()
-    }
-
-
-# ---------------------------------------------------------------------------
-# Core Appointment Cancellation Logic
-# ---------------------------------------------------------------------------
-async def cancel_appointment_core(
-    args: dict,
-    tool_call_id: Optional[str],
-    db: Session
-):
-    """Core cancellation function supporting flexible date/time/name lookups."""
-    patient_name = _extract_patient_name(args)
-    parsed_dt, raw_time = _extract_datetime_and_time(args)
-    target_date = _parse_date_value(args.get("date") or args.get("start_time") or args.get("startTime") or (parsed_dt.date() if parsed_dt else None))
-
-    # If date was not parsed directly from expected keys, scan all string values in args
-    if not target_date:
-        for k, v in args.items():
-            if isinstance(v, str):
-                p_date = _parse_date_value(v)
-                if p_date:
-                    target_date = p_date
-                    break
-
-    if not target_date:
-        detail = "Please specify the date of the appointment you wish to cancel."
-        return {
-            "success": False,
-            "status": "error",
-            "message": detail,
-            "detail": detail,
-            "result": detail,
-            "results": [{"toolCallId": tool_call_id or "tool_call_result", "result": detail}],
-            "canceled_count": 0
-        }
-
-    start_dt = dt.datetime.combine(target_date, dt.time.min)
-    end_dt = start_dt + dt.timedelta(days=1)
-
-    query = (
-        select(Appointment)
-        .where(Appointment.start_time >= start_dt)
-        .where(Appointment.start_time < end_dt)
-        .where(Appointment.canceled == False)
-    )
-
-    # Filter by patient name if provided and not generic
-    if patient_name and patient_name.lower().strip() not in ["caller", "user", "me", "patient", "myself", "client", ""]:
-        query = query.where(Appointment.patient_name.ilike(f"%{patient_name.strip()}%"))
-
-    # If specific time is provided, prioritize matching by that slot
-    time_raw = args.get("time")
-    if time_raw:
-        p_time = _parse_time_value(str(time_raw))
-        if p_time:
-            exact_dt = dt.datetime.combine(target_date, p_time)
-            time_query = query.where(Appointment.start_time >= exact_dt - dt.timedelta(minutes=15))\
-                              .where(Appointment.start_time <= exact_dt + dt.timedelta(minutes=15))
-            matched_by_time = db.execute(time_query).scalars().all()
-            if matched_by_time:
-                appointments = matched_by_time
-            else:
-                appointments = db.execute(query).scalars().all()
-        else:
-            appointments = db.execute(query).scalars().all()
-    else:
-        appointments = db.execute(query).scalars().all()
-
-    if not appointments:
-        detail = f"No active appointment was found on {target_date.strftime('%B %d, %Y')}"
-        if patient_name and patient_name.lower() not in ["caller", "user", "me"]:
-            detail += f" for {patient_name}."
-        else:
-            detail += "."
-        return {
-            "success": False,
-            "status": "not_found",
-            "message": detail,
-            "detail": detail,
-            "result": detail,
-            "results": [{"toolCallId": tool_call_id or "tool_call_result", "result": detail}],
-            "canceled_count": 0
-        }
-
-    for appointment in appointments:
-        appointment.canceled = True
-
-    db.commit()
-
-    try:
-        await manager.broadcast("cancel_appointment")
-    except Exception:
-        pass
-
-    success_msg = f"Your appointment on {target_date.strftime('%B %d, %Y')} has been successfully canceled."
-    return {
-        "success": True,
-        "status": "success",
-        "message": success_msg,
-        "detail": success_msg,
-        "result": success_msg,
-        "results": [
-            {
-                "toolCallId": tool_call_id or "tool_call_result",
-                "result": success_msg
-            }
-        ],
-        "canceled_count": len(appointments)
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -968,26 +181,10 @@ async def schedule_appointment(request: Request, db: Session = Depends(get_db)):
     parsed_dt, raw_time = _extract_datetime_and_time(args)
 
     if not patient_name:
-        detail = "Patient name is required to book an appointment."
-        return {
-            "success": False,
-            "status": "error",
-            "message": detail,
-            "detail": detail,
-            "result": detail,
-            "results": [{"toolCallId": tool_call_id or "tool_call_result", "result": detail}]
-        }
+        return _tool_reply(tool_call_id, "Patient name is required to book an appointment.")
 
     if not parsed_dt:
-        detail = "A valid appointment date and time is required."
-        return {
-            "success": False,
-            "status": "error",
-            "message": detail,
-            "detail": detail,
-            "result": detail,
-            "results": [{"toolCallId": tool_call_id or "tool_call_result", "result": detail}]
-        }
+        return _tool_reply(tool_call_id, "A valid appointment date and time is required.")
 
     return await schedule_appointment_core(patient_name, reason, parsed_dt, tool_call_id, db, call_id=await _extract_call_id(request))
 
@@ -1050,9 +247,7 @@ async def list_appointments(
             transcript=appointment.transcript
         ))
 
-    settings = db.execute(select(ClinicSettings)).scalar_one_or_none()
-    if not settings:
-        settings = ClinicSettings()
+    settings = _load_settings(db)
 
     hours_text = _hours_text(settings)
     working_days_text = _working_days_text(settings)
@@ -1088,84 +283,6 @@ async def list_appointments(
         }
 
     return booked_appointments
-
-
-# ---------------------------------------------------------------------------
-# Call Transcript Handling (VAPI end-of-call-report)
-# ---------------------------------------------------------------------------
-def _format_transcript(report: dict) -> Optional[str]:
-    """Build a readable 'AI: ... / User: ...' transcript from a VAPI end-of-call-report message."""
-    artifact = report.get("artifact") if isinstance(report.get("artifact"), dict) else {}
-    messages = artifact.get("messages") or report.get("messages") or []
-
-    lines = []
-    for m in messages if isinstance(messages, list) else []:
-        if not isinstance(m, dict):
-            continue
-        role = m.get("role")
-        text = (m.get("message") or m.get("content") or "").strip()
-        if not text or role not in ("bot", "assistant", "user"):
-            continue  # skip system prompt, tool calls and tool results
-        lines.append(f"{'User' if role == 'user' else 'AI'}: {text}")
-    if lines:
-        return "\n".join(lines)
-
-    # Fallback: VAPI's ready-made plain-text transcript
-    transcript = artifact.get("transcript") or report.get("transcript")
-    return transcript.strip() if isinstance(transcript, str) and transcript.strip() else None
-
-
-def _to_pkt_naive(value: Any) -> Optional[dt.datetime]:
-    """Convert a VAPI ISO timestamp (UTC, e.g. '2026-11-01T14:36:10.123Z') to naive Pakistan time, matching stored times."""
-    if not isinstance(value, str) or not value:
-        return None
-    try:
-        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=dt.timezone.utc)
-    return parsed.astimezone(PKT).replace(tzinfo=None)
-
-
-async def _save_call_transcript(report: dict, db: Session) -> dict:
-    """Attach the call transcript to every appointment booked during that call."""
-    call = report.get("call") if isinstance(report.get("call"), dict) else {}
-    call_id = call.get("id")
-    transcript = _format_transcript(report)
-    if not call_id or not transcript:
-        print(f"[VAPI TRANSCRIPT] Skipped: call_id={call_id}, has_transcript={bool(transcript)}")
-        return {"status": "ok", "saved": 0}
-
-    appointments = db.execute(select(Appointment).where(Appointment.call_id == str(call_id))).scalars().all()
-
-    # "API Request" tools don't send the call ID, so fall back to appointments booked during the call
-    if not appointments:
-        window_start = _to_pkt_naive(report.get("startedAt") or call.get("startedAt") or call.get("createdAt"))
-        window_end = _to_pkt_naive(report.get("endedAt") or call.get("endedAt")) or get_pakistan_now()
-        if window_start:
-            margin = dt.timedelta(minutes=1)
-            appointments = db.execute(
-                select(Appointment)
-                .where(Appointment.created_at >= window_start - margin)
-                .where(Appointment.created_at <= window_end + margin)
-                .where(Appointment.call_id.is_(None))
-                .where(Appointment.transcript.is_(None))
-            ).scalars().all()
-            for appointment in appointments:
-                appointment.call_id = str(call_id)
-
-    for appointment in appointments:
-        appointment.transcript = transcript
-    db.commit()
-    print(f"[VAPI TRANSCRIPT] call_id={call_id}: saved to {len(appointments)} appointment(s)")
-
-    if appointments:
-        try:
-            await manager.broadcast("transcript_saved")
-        except Exception:
-            pass
-    return {"status": "ok", "saved": len(appointments)}
 
 
 # ---------------------------------------------------------------------------
@@ -1222,8 +339,7 @@ async def vapi_webhook_router(request: Request, db: Session = Depends(get_db)):
     elif "availab" in func_lower or "list" in func_lower or "doctor" in func_lower:
         date_arg = args.get("date") or args.get("start_time")
         target_date = _parse_date_value(date_arg)
-        settings = db.execute(select(ClinicSettings)).scalar_one_or_none() or ClinicSettings()
-        summary, _ = _availability_summary(db, settings, target_date)
+        summary, _ = _availability_summary(db, _load_settings(db), target_date)
         return {
             "results": [
                 {

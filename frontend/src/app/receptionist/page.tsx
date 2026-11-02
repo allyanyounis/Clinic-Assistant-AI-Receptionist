@@ -1,27 +1,30 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { Bot, CalendarPlus, CalendarClock, Clock } from "lucide-react";
 import { Sidebar } from "@/components/Sidebar";
 import { Header } from "@/components/Header";
 import { AIReceptionist, CallStatus } from "@/components/AIReceptionist";
-import { API_BASE_URL } from "@/config";
-import { Appointment, ClinicSettings } from "@/types";
 import { toDateKey } from "@/lib/appointmentStats";
+import { useReceptionistData } from "@/hooks/useReceptionistData";
 
-const formatHour12 = (hour: number) => `${hour % 12 || 12}:00 ${hour < 12 ? "AM" : "PM"}`;
+/** "13:30" -> "1:30 PM" */
+const formatTime12 = (hhmm: string) => {
+    const hour = parseInt(hhmm.slice(0, 2));
+    return `${hour % 12 || 12}:${hhmm.slice(3, 5)} ${hour < 12 ? "AM" : "PM"}`;
+};
 
 const STATUS_BADGE: Record<CallStatus, { label: string; className: string; note: string }> = {
     idle: { label: "Ready", className: "bg-green-100 text-green-700", note: "Agent configured" },
     connecting: { label: "Connecting", className: "bg-amber-100 text-amber-700", note: "Starting the call" },
-    active: { label: "On a call", className: "bg-[#fde8ea] text-[#8B2635]", note: "Talking to a patient" },
+    active: { label: "On a call", className: "bg-brand-100 text-brand-700", note: "Talking to a patient" },
 };
 
 function StatCard({ title, icon: Icon, children, note }: {
     title: string; icon: React.ElementType; children: React.ReactNode; note: string;
 }) {
     return (
-        <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-5">
+        <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-5 card-hover">
             <div className="flex items-center justify-between text-gray-600 mb-3">
                 <span className="text-sm font-medium">{title}</span>
                 <Icon className="w-4 h-4 text-gray-400" />
@@ -32,34 +35,9 @@ function StatCard({ title, icon: Icon, children, note }: {
     );
 }
 
-async function loadReceptionistData(): Promise<{ appointments: Appointment[]; settings: ClinicSettings }> {
-    const headers = { "Content-Type": "application/json", "ngrok-skip-browser-warning": "true" };
-    const [apptRes, settingsRes] = await Promise.all([
-        fetch(`${API_BASE_URL}/list_appointments/?cb=1`, { method: "POST", headers, body: JSON.stringify({}) }),
-        fetch(`${API_BASE_URL}/settings/?cb=1`, { headers }),
-    ]);
-    const apptData = await apptRes.json();
-    return {
-        appointments: Array.isArray(apptData) ? apptData : (apptData.appointments || []),
-        settings: await settingsRes.json(),
-    };
-}
-
 export default function ReceptionistPage() {
     const [callStatus, setCallStatus] = useState<CallStatus>("idle");
-    const [appointments, setAppointments] = useState<Appointment[]>([]);
-    const [settings, setSettings] = useState<ClinicSettings | null>(null);
-
-    const fetchData = useCallback(() => {
-        loadReceptionistData()
-            .then(({ appointments, settings }) => {
-                setAppointments(appointments);
-                setSettings(settings);
-            })
-            .catch((error) => console.error("Failed to fetch receptionist data:", error));
-    }, []);
-
-    useEffect(fetchData, [fetchData]);
+    const { appointments, settings, fetchData } = useReceptionistData();
 
     // Refresh the numbers when a call ends, since the agent may have just booked an appointment
     const prevStatus = useRef<CallStatus>("idle");
@@ -74,9 +52,10 @@ export default function ReceptionistPage() {
     const bookedToday = appointments.filter((a) => toDateKey(new Date(a.created_at)) === todayKey).length;
     const upcoming = appointments.filter((a) => !a.canceled && new Date(a.start_time) >= now).length;
     const badge = STATUS_BADGE[callStatus];
+    const todaySchedule = settings?.weekly_schedule?.[(now.getDay() + 6) % 7];
 
     return (
-        <div className="flex min-h-screen bg-[#f0f2f5] font-sans">
+        <div className="flex min-h-screen bg-surface font-sans">
             <Sidebar />
 
             <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
@@ -103,12 +82,14 @@ export default function ReceptionistPage() {
                             <p className="text-3xl font-bold text-gray-800">{upcoming}</p>
                         </StatCard>
                         <StatCard
-                            title="Clinic Hours"
+                            title="Today's Hours"
                             icon={Clock}
                             note={settings ? `${settings.slot_duration_minutes}-minute slots` : "Loading schedule..."}
                         >
                             <p className="text-lg font-bold text-gray-800">
-                                {settings ? `${formatHour12(settings.start_hour)} – ${formatHour12(settings.end_hour)}` : "—"}
+                                {!todaySchedule ? "—" : todaySchedule.enabled
+                                    ? `${formatTime12(todaySchedule.start)} – ${formatTime12(todaySchedule.end)}`
+                                    : "Day off"}
                             </p>
                         </StatCard>
                     </div>

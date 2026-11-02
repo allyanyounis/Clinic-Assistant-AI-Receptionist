@@ -1,26 +1,93 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+/* ---------------------------------------------------------------------------
+   DocAssist AI theme: "Clinic Maroon". Change the brand here, not in components.
+   Use as bg-brand-700, text-brand-600, ring-brand-500/20, bg-surface ...
+   --------------------------------------------------------------------------- */
+@theme {
+  --color-brand-50: #fdf2f4;
+  --color-brand-100: #fde8e9;
+  --color-brand-200: #f9d2d7;
+  --color-brand-300: #f0a3ad;
+  --color-brand-400: #d9677a;
+  --color-brand-500: #b3394b;
+  --color-brand-600: #9c3241;
+  --color-brand-700: #8b2635; /* primary */
+  --color-brand-800: #6b1925; /* primary hover */
+  --color-brand-900: #5c1620;
+  --color-brand-950: #53131d; /* sidebar */
+
+  --color-surface: #f0f2f5; /* page background */
+  --color-background: #ffffff;
+  --color-foreground: #0f172a;
 }
 
+/* Font variables are set on <body> by next/font, so they must be inlined */
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--color-surface);
+  color: var(--color-foreground);
+  font-family: var(--font-geist-sans), ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+/* Smooth hover / press feedback on every interactive element */
+button,
+a,
+select,
+input,
+[role="switch"] {
+  transition-property: color, background-color, border-color, box-shadow, opacity, transform;
+  transition-duration: 160ms;
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+button:not(:disabled),
+select:not(:disabled),
+[role="button"],
+label[for] {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+/* Visible keyboard focus in the brand colour */
+:focus-visible {
+  outline: 2px solid var(--color-brand-500);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: var(--color-brand-100);
+  color: var(--color-brand-900);
+}
+
+/* Cards that lift slightly on hover */
+.card-hover {
+  transition: box-shadow 200ms ease, transform 200ms ease, border-color 200ms ease;
+}
+.card-hover:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 24px -12px rgb(15 23 42 / 0.18), 0 2px 6px -2px rgb(15 23 42 / 0.06);
+  border-color: var(--color-brand-100);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    transition-duration: 0ms !important;
+    animation-duration: 0ms !important;
+  }
+  .card-hover:hover {
+    transform: none;
+  }
+}
+
+/* Gentle press feedback on buttons */
+button:not(:disabled):not([role="switch"]):active {
+  transform: scale(0.97);
 }

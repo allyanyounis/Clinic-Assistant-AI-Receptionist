@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
+import { useMounted } from "@/hooks/useMounted";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from "recharts";
 import { Calendar as CalendarIcon } from "lucide-react";
 
@@ -19,12 +20,11 @@ export function MainChartArea({
 }) {
     const [activeTab, setActiveTab] = useState("Sales");
     const [timeRange, setTimeRange] = useState("Next 10 Days");
-    const [mounted, setMounted] = useState(false);
 
     // Only render the chart after the component mounts so the DOM container
     // has real pixel dimensions. Recharts reads width/height synchronously
     // and gets -1 before layout completes (SSR / StrictMode double-render).
-    useEffect(() => { setMounted(true); }, []);
+    const mounted = useMounted();
 
     // Dynamically calculate the 10 day window data
     const generateChartData = () => {
@@ -81,20 +81,20 @@ export function MainChartArea({
     const endDateStr = `${endDate.getFullYear()}-${String(endDate.getMonth() + 1).padStart(2, '0')}-${String(endDate.getDate()).padStart(2, '0')}`;
 
     return (
-        <div className="bg-white rounded-md shadow-sm border border-gray-100 mb-6">
+        <div className="bg-white rounded-xl shadow-sm border border-gray-100 mb-6">
 
             {/* Header Tabs (Matches exactly) */}
             <div className="flex flex-col md:flex-row md:items-center justify-between px-6 py-4 border-b border-gray-100">
                 <div className="flex items-center space-x-6 text-base mt-2 md:mt-0">
                     <button
                         onClick={() => setActiveTab("Sales")}
-                        className={`pb-4 border-b-2 font-medium ${activeTab === "Sales" ? "border-[#8B2635] text-[#8B2635]" : "border-transparent text-gray-800 hover:text-[#8B2635]"} -mb-[17px]`}
+                        className={`pb-4 border-b-2 font-semibold ${activeTab === "Sales" ? "border-brand-700 text-brand-700" : "border-transparent text-gray-800 hover:text-brand-700"} -mb-[17px]`}
                     >
                         Appointments
                     </button>
                     <button
                         onClick={() => setActiveTab("Visits")}
-                        className={`pb-4 border-b-2 font-medium ${activeTab === "Visits" ? "border-[#8B2635] text-[#8B2635]" : "border-transparent text-gray-800 hover:text-[#8B2635]"} -mb-[17px]`}
+                        className={`pb-4 border-b-2 font-semibold ${activeTab === "Visits" ? "border-brand-700 text-brand-700" : "border-transparent text-gray-800 hover:text-brand-700"} -mb-[17px]`}
                     >
                         Visits
                     </button>
@@ -106,14 +106,14 @@ export function MainChartArea({
                             <button
                                 key={range}
                                 onClick={() => setTimeRange(range)}
-                                className={`${timeRange === range ? "text-[#8B2635]" : "hover:text-[#8B2635]"}`}
+                                className={`${timeRange === range ? "text-brand-700" : "hover:text-brand-700"}`}
                             >
                                 {range}
                             </button>
                         ))}
                     </div>
 
-                    <div className="flex items-center border border-gray-300 rounded px-2 md:px-3 py-1.5 bg-white cursor-pointer hover:border-[#8B2635] w-fit">
+                    <div className="flex items-center border border-gray-300 rounded px-2 md:px-3 py-1.5 bg-white cursor-pointer hover:border-brand-700 w-fit">
                         <span className="mr-2 md:mr-3 text-xs md:text-sm">{startDateStr} ~ {endDateStr}</span>
                         <CalendarIcon className="w-4 h-4 text-gray-400" />
                     </div>
@@ -125,7 +125,7 @@ export function MainChartArea({
 
                 {/* Left Side: Bar Chart */}
                 <div className="lg:col-span-2">
-                    <h4 className="text-base font-medium text-gray-800 mb-6">10-Day Appointment Trends</h4>
+                    <h4 className="text-lg font-semibold text-gray-900 mb-6">10-Day Appointment Trends</h4>
                     <div className="h-[300px] w-full overflow-hidden">
                         {mounted && (
                         <ResponsiveContainer width="100%" height={300} minWidth={0} minHeight={300} initialDimension={{ width: 1, height: 300 }}>
@@ -168,7 +168,7 @@ export function MainChartArea({
 
                 {/* Right Side: Ranking List */}
                 <div>
-                    <h4 className="text-base font-medium text-gray-800 mb-6">Top Visit Reasons</h4>
+                    <h4 className="text-lg font-semibold text-gray-900 mb-6">Top Visit Reasons</h4>
                     {rankingData.length === 0 ? (
                         <p className="text-sm text-gray-400 italic">No active appointments yet.</p>
                     ) : (
@@ -176,12 +176,12 @@ export function MainChartArea({
                             {rankingData.map((item) => (
                                 <li key={item.rank} className="flex items-center justify-between">
                                     <div className="flex items-center min-w-0">
-                                        <span className={`w-5 h-5 shrink-0 flex items-center justify-center rounded-full text-xs mr-4 ${item.rank <= 3 ? "bg-[#6B1925] text-white" : "bg-[#f5f5f5] text-[#6B1925]"}`}>
+                                        <span className={`w-5 h-5 shrink-0 flex items-center justify-center rounded-full text-xs mr-4 ${item.rank <= 3 ? "bg-brand-800 text-white" : "bg-[#f5f5f5] text-brand-800"}`}>
                                             {item.rank}
                                         </span>
-                                        <span className="text-sm text-gray-600 truncate">{item.title}</span>
+                                        <span className="text-sm font-medium text-gray-700 truncate">{item.title}</span>
                                     </div>
-                                    <span className="text-sm font-medium text-gray-800 ml-3">{item.count}</span>
+                                    <span className="text-sm font-bold text-gray-900 ml-3">{item.count}</span>
                                 </li>
                             ))}
                         </ul>

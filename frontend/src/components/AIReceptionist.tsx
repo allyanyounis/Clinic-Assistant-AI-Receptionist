@@ -1,31 +1,10 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import Vapi from "@vapi-ai/web";
+import { useEffect, useRef } from "react";
 import { Phone, PhoneOff, Mic, MicOff, Bot, AlertCircle, Loader2 } from "lucide-react";
+import { CallStatus, useVapiCall } from "@/hooks/useVapiCall";
 
-// VAPI credentials (loaded from .env.local with safe fallbacks)
-const VAPI_PUBLIC_KEY = process.env.NEXT_PUBLIC_VAPI_PUBLIC_KEY || "d5ff950e-41e8-43e1-8d83-f0b33e539a6c";
-const ASSISTANT_ID = process.env.NEXT_PUBLIC_VAPI_ASSISTANT_ID || "353a0909-4321-4a6a-901c-b577d41c7d7c";
-
-// Store Vapi on globalThis so it survives Next.js HMR (Fast Refresh).
-declare global { var __vapiInstance: Vapi | undefined; }
-function getVapi(): Vapi {
-  if (!globalThis.__vapiInstance) {
-    globalThis.__vapiInstance = new Vapi(VAPI_PUBLIC_KEY);
-  }
-  return globalThis.__vapiInstance;
-}
-
-export type CallStatus = "idle" | "connecting" | "active";
-
-interface TranscriptEntry {
-  role: "assistant" | "user";
-  text: string;
-  final: boolean;
-  /** Seconds since the call started. */
-  at: number;
-}
+export type { CallStatus };
 
 const SPEAKERS = {
   assistant: { tag: "S1", label: "Agent · Steven Smith" },
@@ -35,27 +14,12 @@ const SPEAKERS = {
 // Relative heights for the waveform bars (tallest in the middle)
 const BAR_SHAPE = [0.35, 0.5, 0.65, 0.8, 0.95, 1, 0.95, 0.8, 0.65, 0.5, 0.35];
 
-// Minimal shapes of the Vapi SDK events this component reads
-interface VapiMessage { type?: string; role?: string; transcript?: string; transcriptType?: string }
-interface VapiError {
-  type?: string;
-  errorMsg?: string;
-  message?: unknown;
-  error?: { msg?: string; errorMsg?: string; message?: unknown; error?: { type?: string } };
-}
-
 const formatClock = (seconds: number) =>
   `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
 
 export function AIReceptionist({ onStatusChange }: { onStatusChange?: (status: CallStatus) => void }) {
-  const [status, setStatus] = useState<CallStatus>("idle");
-  const [assistantSpeaking, setAssistantSpeaking] = useState(false);
-  const [volume, setVolume] = useState(0);
-  const [muted, setMuted] = useState(false);
-  const [elapsed, setElapsed] = useState(0);
-  const [entries, setEntries] = useState<TranscriptEntry[]>([]);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const callStartRef = useRef<number | null>(null);
+  const { status, assistantSpeaking, volume, muted, elapsed, entries, errorMessage, startCall, endCall, toggleMute } =
+    useVapiCall();
   const transcriptEndRef = useRef<HTMLDivElement>(null);
 
   // Let the page reflect call state (e.g. the Agent Status card)
@@ -67,121 +31,6 @@ export function AIReceptionist({ onStatusChange }: { onStatusChange?: (status: C
   useEffect(() => {
     transcriptEndRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }, [entries]);
-
-  // Call timer
-  useEffect(() => {
-    if (status !== "active") return;
-    const timer = setInterval(() => {
-      if (callStartRef.current) setElapsed(Math.floor((Date.now() - callStartRef.current) / 1000));
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [status]);
-
-  // Attach / detach Vapi event listeners
-  useEffect(() => {
-    const vapi = getVapi();
-    const secondsIntoCall = () =>
-      callStartRef.current ? Math.floor((Date.now() - callStartRef.current) / 1000) : 0;
-
-    const resetCallState = () => {
-      setStatus("idle");
-      setAssistantSpeaking(false);
-      setVolume(0);
-      setMuted(false);
-      callStartRef.current = null;
-    };
-
-    const onCallStart = () => {
-      callStartRef.current = Date.now();
-      setElapsed(0);
-      setErrorMessage(null);
-      setStatus("active");
-    };
-
-    const onMessage = (msg: VapiMessage) => {
-      if (msg.type !== "transcript" || (msg.role !== "assistant" && msg.role !== "user")) return;
-      const role = msg.role;
-      const text = msg.transcript ?? "";
-      const isFinal = msg.transcriptType === "final";
-      setEntries((prev) => {
-        const last = prev[prev.length - 1];
-        // Replace the in-progress (partial) line of the same speaker with the newer text
-        if (last && !last.final && last.role === role) {
-          return [...prev.slice(0, -1), { ...last, text, final: isFinal }];
-        }
-        return [...prev, { role, text, final: isFinal, at: secondsIntoCall() }];
-      });
-    };
-
-    const onError = (e: VapiError) => {
-      // "Meeting has ended" is the normal room-closure event (e.g. assistant hung up).
-      // The SDK wraps it as { type: "daily-error", error: { errorMsg, error: { type: "ejected" } } }.
-      const endedMsg = e?.errorMsg || e?.error?.errorMsg || e?.error?.msg;
-      if (endedMsg === "Meeting has ended" || e?.error?.error?.type === "ejected") {
-        resetCallState();
-        return;
-      }
-
-      console.error("Vapi Error:", e);
-      let msg = "";
-      if (e?.error?.message) {
-        msg = typeof e.error.message === "string" ? e.error.message : JSON.stringify(e.error.message);
-      } else if (e?.message) {
-        msg = typeof e.message === "string" ? e.message : JSON.stringify(e.message);
-      }
-
-      if (e?.type === "start-method-error" || msg.toLowerCase().includes("credit") || msg.toLowerCase().includes("balance")) {
-        setErrorMessage(msg || "Call failed to start: insufficient VAPI credits. Please recharge on dashboard.vapi.ai.");
-      } else {
-        setErrorMessage(msg || "Call failed to connect. Please check microphone permissions or VAPI credits.");
-      }
-      resetCallState();
-    };
-
-    const onSpeechStart = () => setAssistantSpeaking(true);
-    const onSpeechEnd = () => setAssistantSpeaking(false);
-    const onVolume = (level: number) => setVolume(level);
-
-    vapi.on("call-start", onCallStart);
-    vapi.on("call-end", resetCallState);
-    vapi.on("message", onMessage);
-    vapi.on("error", onError);
-    vapi.on("speech-start", onSpeechStart);
-    vapi.on("speech-end", onSpeechEnd);
-    vapi.on("volume-level", onVolume);
-
-    return () => {
-      vapi.off("call-start", onCallStart);
-      vapi.off("call-end", resetCallState);
-      vapi.off("message", onMessage);
-      vapi.off("error", onError);
-      vapi.off("speech-start", onSpeechStart);
-      vapi.off("speech-end", onSpeechEnd);
-      vapi.off("volume-level", onVolume);
-    };
-  }, []);
-
-  const startCall = async () => {
-    setEntries([]);
-    setErrorMessage(null);
-    setElapsed(0);
-    setStatus("connecting");
-    try {
-      await getVapi().start(ASSISTANT_ID);
-    } catch (err) {
-      console.error("Failed to start call:", err);
-      setErrorMessage((err instanceof Error && err.message) || "Failed to start call. Please check your VAPI dashboard credits.");
-      setStatus("idle");
-    }
-  };
-
-  const endCall = () => getVapi().stop();
-
-  const toggleMute = () => {
-    const next = !muted;
-    getVapi().setMuted(next);
-    setMuted(next);
-  };
 
   const isActive = status === "active";
   const headline =
@@ -196,7 +45,7 @@ export function AIReceptionist({ onStatusChange }: { onStatusChange?: (status: C
     <div className="grid grid-cols-1 xl:grid-cols-5 gap-6">
 
       {/* Call stage */}
-      <div className="xl:col-span-3 relative overflow-hidden rounded-2xl border border-gray-100 shadow-sm bg-gradient-to-br from-[#fdf2f4] via-white to-[#f6f7f9] px-6 py-10 flex flex-col items-center justify-center min-h-[460px]">
+      <div className="xl:col-span-3 relative overflow-hidden rounded-2xl border border-gray-100 shadow-sm bg-gradient-to-br from-brand-50 via-white to-surface px-6 py-10 flex flex-col items-center justify-center min-h-[460px]">
 
         {errorMessage && (
           <div className="absolute top-4 left-4 right-4 p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700 flex items-start gap-2">
@@ -212,16 +61,16 @@ export function AIReceptionist({ onStatusChange }: { onStatusChange?: (status: C
         <div className="relative flex items-center justify-center w-48 h-48">
           {isActive && (
             <>
-              <span className="absolute inset-0 rounded-full bg-[#8B2635]/10 animate-ping" style={{ animationDuration: "2s" }} />
+              <span className="absolute inset-0 rounded-full bg-brand-700/10 animate-ping" style={{ animationDuration: "2s" }} />
               <span
-                className="absolute rounded-full border-2 border-[#8B2635]/30 transition-all duration-150"
+                className="absolute rounded-full border-2 border-brand-700/30 transition-all duration-150"
                 style={{ inset: `${12 - volume * 12}px` }}
               />
             </>
           )}
-          <span className="absolute inset-6 rounded-full border border-[#8B2635]/20" />
+          <span className="absolute inset-6 rounded-full border border-brand-700/20" />
           <div
-            className={`relative w-28 h-28 rounded-full flex items-center justify-center shadow-lg transition-all duration-300 ${isActive ? "bg-[#8B2635] text-white" : "bg-[#fde8ea] text-[#8B2635]"
+            className={`relative w-28 h-28 rounded-full flex items-center justify-center shadow-lg transition-all duration-300 ${isActive ? "bg-brand-700 text-white" : "bg-brand-100 text-brand-700"
               }`}
           >
             {status === "connecting" ? <Loader2 className="w-12 h-12 animate-spin" /> : <Bot className="w-12 h-12" />}
@@ -238,7 +87,7 @@ export function AIReceptionist({ onStatusChange }: { onStatusChange?: (status: C
             return (
               <span
                 key={i}
-                className={`w-2 rounded-full transition-all duration-150 ${isActive ? "bg-[#8B2635]" : "bg-gray-300"}`}
+                className={`w-2 rounded-full transition-all duration-150 ${isActive ? "bg-brand-700" : "bg-gray-300"}`}
                 style={{ height: `${Math.max(6, shape * level * 64 + (assistantSpeaking ? (i % 3) * 3 : 0))}px` }}
               />
             );
@@ -262,7 +111,7 @@ export function AIReceptionist({ onStatusChange }: { onStatusChange?: (status: C
             <button
               onClick={startCall}
               title="Start call"
-              className="px-8 h-16 rounded-full bg-[#8B2635] hover:bg-[#6B1925] text-white font-semibold shadow-lg flex items-center gap-3 transition-all active:scale-95"
+              className="px-8 h-16 rounded-full bg-brand-700 hover:bg-brand-800 text-white font-semibold shadow-lg flex items-center gap-3 transition-all active:scale-95"
             >
               <Phone className="w-6 h-6" />
               Call AI Receptionist
@@ -286,7 +135,7 @@ export function AIReceptionist({ onStatusChange }: { onStatusChange?: (status: C
           <div>
             <h3 className="font-bold text-gray-800">Live Transcript</h3>
             <p className="text-xs text-gray-400">
-              <span className="font-semibold text-[#8B2635]">S1</span> Agent ·{" "}
+              <span className="font-semibold text-brand-700">S1</span> Agent ·{" "}
               <span className="font-semibold text-slate-600">S2</span> Patient
             </p>
           </div>
@@ -309,14 +158,14 @@ export function AIReceptionist({ onStatusChange }: { onStatusChange?: (status: C
               return (
                 <div key={idx} className="flex gap-3">
                   <span
-                    className={`w-8 h-8 shrink-0 rounded-full flex items-center justify-center text-xs font-bold ${isAgent ? "bg-[#8B2635] text-white" : "bg-slate-200 text-slate-700"
+                    className={`w-8 h-8 shrink-0 rounded-full flex items-center justify-center text-xs font-bold ${isAgent ? "bg-brand-700 text-white" : "bg-slate-200 text-slate-700"
                       }`}
                   >
                     {speaker.tag}
                   </span>
                   <div className="min-w-0 flex-1">
                     <p className="text-xs text-gray-400 mb-0.5">
-                      <span className={`font-semibold ${isAgent ? "text-[#8B2635]" : "text-slate-600"}`}>{speaker.label}</span>
+                      <span className={`font-semibold ${isAgent ? "text-brand-700" : "text-slate-600"}`}>{speaker.label}</span>
                       {" · "}{formatClock(entry.at)}
                     </p>
                     <p className={`text-gray-800 leading-relaxed ${entry.final ? "" : "text-gray-400 italic"}`}>{entry.text}</p>

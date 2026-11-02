@@ -6,7 +6,7 @@ import { Search, HelpCircle, Bell, Pencil, ChevronRight } from "lucide-react";
 
 export default function AccountPage() {
     return (
-        <div className="flex min-h-screen bg-[#f0f2f5] font-sans">
+        <div className="flex min-h-screen bg-surface font-sans">
             <Sidebar />
 
             <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
@@ -44,13 +44,13 @@ export default function AccountPage() {
 
                                     {/* Avatar Column */}
                                     <div className="relative shrink-0 flex items-center justify-center md:mr-4">
-                                        <div className="w-40 h-40 rounded-full bg-[#fde8e9] border-4 border-white shadow-lg overflow-hidden flex items-center justify-center">
+                                        <div className="w-40 h-40 rounded-full bg-brand-100 border-4 border-white shadow-lg overflow-hidden flex items-center justify-center">
                                             {/* Doctor Avatar Placeholder */}
-                                            <svg className="w-full h-full text-[#8B2635]" fill="currentColor" viewBox="0 0 24 24">
+                                            <svg className="w-full h-full text-brand-700" fill="currentColor" viewBox="0 0 24 24">
                                                 <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 3c1.66 0 3 1.34 3 3s-1.34 3-3 3-3-1.34-3-3 1.34-3 3-3zm0 14.2c-2.5 0-4.71-1.28-6-3.22.03-1.99 4-3.08 6-3.08 1.99 0 5.97 1.09 6 3.08-1.29 1.94-3.5 3.22-6 3.22z"/>
                                             </svg>
                                         </div>
-                                        <button className="absolute bottom-2 right-2 bg-[#8B2635] text-white p-2.5 rounded-full shadow-xl hover:bg-[#6B1925] transition-all hover:scale-110 active:scale-95 border-2 border-white">
+                                        <button className="absolute bottom-2 right-2 bg-brand-700 text-white p-2.5 rounded-full shadow-xl hover:bg-brand-800 transition-all hover:scale-110 active:scale-95 border-2 border-white">
                                             <Pencil className="w-4 h-4" />
                                         </button>
                                     </div>
@@ -63,7 +63,7 @@ export default function AccountPage() {
                                             <p className="font-bold text-gray-800 text-lg tracking-tight shrink-0">Email:</p>
                                             <p className="text-lg text-gray-600 font-medium">dr.olivia@bennett.com</p>
                                         </div>
-                                        <button className="px-6 py-1.5 border-2 border-[#8B2635]/20 text-[#8B2635] rounded-lg text-sm font-bold hover:bg-[#8B2635] hover:text-white transition-all active:scale-95">
+                                        <button className="px-6 py-1.5 border-2 border-brand-700/20 text-brand-700 rounded-lg text-sm font-bold hover:bg-brand-700 hover:text-white transition-all active:scale-95">
                                             Edit
                                         </button>
                                     </div>
@@ -74,7 +74,7 @@ export default function AccountPage() {
                                             <p className="font-bold text-gray-800 text-lg tracking-tight shrink-0">Phone:</p>
                                             <p className="text-lg text-gray-600 font-medium">+1-903-527-1270</p>
                                         </div>
-                                        <button className="px-6 py-1.5 border-2 border-[#8B2635]/20 text-[#8B2635] rounded-lg text-sm font-bold hover:bg-[#8B2635] hover:text-white transition-all active:scale-95">
+                                        <button className="px-6 py-1.5 border-2 border-brand-700/20 text-brand-700 rounded-lg text-sm font-bold hover:bg-brand-700 hover:text-white transition-all active:scale-95">
                                             Edit
                                         </button>
                                     </div>

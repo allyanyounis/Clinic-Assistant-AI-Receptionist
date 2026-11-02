@@ -5,7 +5,7 @@ import { Appointment } from "@/types";
 
 export function AppointmentTable({ appointments }: { appointments: Appointment[] }) {
     return (
-        <div className="bg-white rounded-md shadow-sm border border-gray-100 overflow-hidden mt-6">
+        <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden mt-6">
             <div className="px-6 py-4 border-b border-gray-100">
                 <h3 className="text-lg font-medium text-gray-800">Recent Appointments</h3>
             </div>
@@ -40,13 +40,13 @@ export function AppointmentTable({ appointments }: { appointments: Appointment[]
                                 });
 
                                 return (
-                                    <tr key={appt.id} className="hover:bg-gray-50 transition-colors">
+                                    <tr key={appt.id} className="hover:bg-brand-50/60 transition-colors">
                                         <td className="px-6 py-4 text-center font-medium text-gray-400 w-12">
                                             {index + 1}
                                         </td>
                                         <td className="px-6 py-4">
                                             <div className="flex items-center gap-3">
-                                                <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center text-blue-600">
+                                                <div className="w-8 h-8 rounded-full bg-brand-100 flex items-center justify-center text-brand-700">
                                                     <User className="w-4 h-4" />
                                                 </div>
                                                 <span className="font-medium text-gray-800">{appt.patient_name}</span>
@@ -88,7 +88,7 @@ export function AppointmentTable({ appointments }: { appointments: Appointment[]
 
             <div className="px-6 py-4 bg-gray-50 border-t border-gray-100 flex justify-between items-center">
                 <span className="text-sm text-gray-500">Showing {appointments.length} appointments</span>
-                <a href="/appointments" className="text-[#8B2635] hover:text-[#9C3241] text-sm font-medium cursor-pointer">View All</a>
+                <a href="/appointments" className="text-brand-700 hover:text-brand-600 text-sm font-medium cursor-pointer">View All</a>
             </div>
         </div>
     );

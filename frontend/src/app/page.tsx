@@ -1,86 +1,21 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
 import { Sidebar } from "@/components/Sidebar";
 import { Header } from "@/components/Header";
 import { TopSummaryCards } from "@/components/TopSummaryCards";
 import { MainChartArea } from "@/components/MainChartArea";
-import { API_BASE_URL } from "@/config";
-import { Appointment } from "@/types";
 import { bookedSince } from "@/lib/appointmentStats";
-
-const NOTIFICATIONS_SEEN_KEY = "notifications_last_seen";
+import { useDashboardData } from "@/hooks/useDashboardData";
+import { useNotifications } from "@/hooks/useNotifications";
 
 export default function Dashboard() {
-    const [appointments, setAppointments] = useState<Appointment[]>([]);
-    const [holidays, setHolidays] = useState<string[]>([]);
-    const [workingDays, setWorkingDays] = useState<number[]>([]);
-    const [loading, setLoading] = useState(false);
-    const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
-    // Bookings made after this moment count as new notifications (defaults to the last 24 hours)
-    const [notificationsSeenAt, setNotificationsSeenAt] = useState<Date>(() => new Date(Date.now() - 24 * 60 * 60 * 1000));
-
-    useEffect(() => {
-        try {
-            const saved = localStorage.getItem(NOTIFICATIONS_SEEN_KEY);
-            if (saved) setNotificationsSeenAt(new Date(saved));
-        } catch {}
-    }, []);
-
-    const markNotificationsSeen = () => {
-        const now = new Date();
-        setNotificationsSeenAt(now);
-        try {
-            localStorage.setItem(NOTIFICATIONS_SEEN_KEY, now.toISOString());
-        } catch {}
-    };
-
-    const fetchAppointments = useCallback(async () => {
-        console.log('Dashboard: Fetching appointments for today');
-        setLoading(true);
-        try {
-            // Fetch Settings first to get holidays
-            const settingsRes = await fetch(`${API_BASE_URL}/settings/?cb=1`, {
-                headers: { "ngrok-skip-browser-warning": "true" }
-            });
-            const settingsData = await settingsRes.json();
-            if (settingsData.holidays) {
-                setHolidays(settingsData.holidays.split(',').map((h: string) => h.trim()));
-            }
-            if (settingsData.working_days) {
-                setWorkingDays(settingsData.working_days.split(',').map((d: string) => parseInt(d.trim())));
-            }
-
-            const today = new Date().toLocaleDateString('en-CA');
-            console.log(`Dashboard: Today's date = ${today}`);
-            const response = await fetch(`${API_BASE_URL}/list_appointments/?cb=1`, {
-                method: "POST",
-                headers: { 
-                    "Content-Type": "application/json",
-                    "ngrok-skip-browser-warning": "true",
-                },
-                body: JSON.stringify({}),
-            });
-            const data = await response.json();
-            console.log(`Dashboard: Received ${data.length} appointments:`, data);
-            setAppointments(Array.isArray(data) ? data : (data.appointments || []));
-            setLastUpdated(new Date());
-        } catch (error) {
-            console.error("Failed to fetch dashboard data:", error);
-        } finally {
-            setLoading(false);
-        }
-    }, []);
-
-    // Initial fetch on mount
-    useEffect(() => {
-        fetchAppointments();
-    }, [fetchAppointments]);
+    const { appointments, holidays, workingDays } = useDashboardData();
+    const { notificationsSeenAt, markNotificationsSeen } = useNotifications();
 
     const newBookings = bookedSince(appointments, notificationsSeenAt);
 
     return (
-        <div className="flex min-h-screen bg-[#f0f2f5] font-sans">
+        <div className="flex min-h-screen bg-surface font-sans">
 
             {/* Sidebar */}
             <Sidebar />

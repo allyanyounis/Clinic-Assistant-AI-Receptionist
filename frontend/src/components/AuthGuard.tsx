@@ -31,8 +31,8 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
     // Prevent splash of content during check
     if (isAuthenticated === null && pathname !== "/login") {
         return (
-            <div className="min-h-screen flex items-center justify-center bg-[#f8f9fa]">
-                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-[#8B2635]"></div>
+            <div className="min-h-screen flex items-center justify-center bg-surface">
+                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-brand-700"></div>
             </div>
         );
     }
